@@ -1,0 +1,23 @@
+services:
+  # A "worker" is a background service that runs continuously, perfect for a bot.
+  - type: worker
+    name: snarky-savings-bot
+    # Use a recent Python version available on Render
+    env: python
+    # Commands to set up the bot
+    buildCommand: "pip install -r requirements.txt"
+    # The command to start your bot
+    startCommand: "python main.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.4
+      # These will be set securely in the Render dashboard
+      - key: TELEGRAM_BOT_TOKEN
+        fromSecret: true
+      - key: ALLOWED_USER_ID
+        fromSecret: true
+    # This creates a persistent disk to store your database file
+    disks:
+      - name: savings-data
+        mountPath: /app/data
+        sizeGB: 1 # The smallest size, more than enough for a database

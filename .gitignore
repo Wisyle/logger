@@ -1,0 +1,23 @@
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# Environment variables - VERY IMPORTANT
+.env
+
+# Local data and generated files
+# The database will live on Render's persistent disk, not in your repo
+savings_bot.db
+*.pdf
+*.csv
+
+# IDE / Editor directories
+.idea/
+.vscode/

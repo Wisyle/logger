@@ -128,12 +128,11 @@ def generate_paginated_keyboard(items: List[Tuple], prefix: str, page: int = 0) 
 
 # --- Database ---
 # Define the persistent data directory for Render
-DATA_DIR = "/app/data"
+DATA_DIR = os.environ.get("DATA_DIR", "./data")
 DB_PATH = os.path.join(DATA_DIR, "savings_bot.db")
 
 def db_connect():
     """Establishes a database connection to the persistent disk."""
-    # Ensure the data directory exists
     os.makedirs(DATA_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON;")

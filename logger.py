@@ -491,7 +491,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 
 def main() -> None:
     init_db()
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
+    application = Application.builder()\
+        .token(TELEGRAM_BOT_TOKEN)\
+        .connect_timeout(30)\
+        .read_timeout(30)\
+        .build()
     application.add_error_handler(error_handler)
     
     # Regex patterns now case-insensitive

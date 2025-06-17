@@ -1,9 +1,6 @@
-import logging
-import os
-import sqlite3
-import csv
-import random
-import re
+import os                         # Added for os.getenv
+import random                     # Added for random.choice
+import logging                    # Added for logging
 from io import StringIO, BytesIO
 from datetime import datetime, time
 from dotenv import load_dotenv
@@ -20,9 +17,6 @@ from telegram.ext import (
     filters,
 )
 from functools import wraps
-import traceback
-import html
-import json
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
@@ -490,13 +484,18 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(message)
 
 def main():
-    application = Application.builder()\
-        .token(TELEGRAM_BOT_TOKEN)\
-        .build()
-        
-    # Start the JobQueue so that context.job_queue is available.
-    application.job_queue.start()
-        
+    # Create the Application instance using v20 builder.
+    # Verify your usage of the builder API matches v20 documentation.
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # If you use the JobQueue in your handlers, ensure the job queue is started.
+    # In v20, the job queue should be available if installed using the job-queue extra.
+    # If you get warnings or errors, double-check that python-telegram-bot[job-queue] is correctly installed.
+    if application.job_queue is not None:
+        application.job_queue.start()
+    else:
+        logger.warning("JobQueue not available. Please install the job-queue extra: pip install 'python-telegram-bot[job-queue]'")
+
     # --- Register handlers ---
     application.add_error_handler(error_handler)
     

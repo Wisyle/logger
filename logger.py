@@ -490,10 +490,14 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.error(message)
 
 def main():
-    init_db()
     application = Application.builder()\
         .token(TELEGRAM_BOT_TOKEN)\
         .build()
+        
+    # Start the JobQueue so that context.job_queue is available.
+    application.job_queue.start()
+        
+    # --- Register handlers ---
     application.add_error_handler(error_handler)
     
     # Regex patterns now case-insensitive

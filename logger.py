@@ -489,12 +489,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     if isinstance(update, Update): await update.message.reply_text("Looks like I tripped over a bug. Try again, I guess.")
     logger.error(message)
 
-def main() -> None:
+def main():
     init_db()
     application = Application.builder()\
         .token(TELEGRAM_BOT_TOKEN)\
-        .connect_timeout(30)\
-        .read_timeout(30)\
         .build()
     application.add_error_handler(error_handler)
     

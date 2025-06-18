@@ -238,9 +238,10 @@ async def delete_message_later(context: ContextTypes.DEFAULT_TYPE):
 
 async def send_and_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, **kwargs):
     try:
-        await update.message.delete()
+        if update.message: # Check if update.message exists (it might not for callback queries)
+            await update.message.delete()
     except BadRequest as e:
-        logger.warning(f"Could not delete user's message {update.message.message_id}: {e}")
+        logger.warning(f"Could not delete user's message {update.message.message_id if update.message else 'N/A'}: {e}")
     sent_message = await context.bot.send_message(chat_id=update.effective_chat.id, text=text, **kwargs)
     context.job_queue.run_once(delete_message_later, MESSAGE_DELETION_DELAY, data={'message_id': sent_message.message_id}, chat_id=update.effective_chat.id)
 
@@ -248,16 +249,13 @@ def restricted(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
         if update.effective_user.id != ALLOWED_USER_ID:
-            await update.message.reply_text("⛔️ Access Denied. I'm a one-person bot. And you're not that person.")
+            await (update.message or update.callback_query).reply_text("⛔️ Access Denied. I'm a one-person bot. And you're not that person.")
             return
         return await func(update, context, *args, **kwargs)
     return wrapped
 
 
 # --- Command & Conversation Handlers (Largely unchanged) ---
-
-# ... (All command and conversation handler functions from the original script go here, no changes needed in them) ...
-# For brevity, I am omitting the identical handler code. The only change is in `export_data`.
 
 @restricted
 async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -277,14 +275,17 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     csv_output = StringIO()
     csv_writer = csv.writer(csv_output)
     csv_writer.writerow(["Name", "Type", "Target", "Currency", "Amount Paid/Saved", "Date"])
-    csv_writer.writerows(records)
+    # Convert records to list of lists for csv.writerows
+    csv_records_for_export = [[r[0], r[1], f"{r[2]:,.2f}", r[3], f"{r[4]:,.2f}", datetime.strptime(r[5], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M')] for r in records]
+    csv_writer.writerows(csv_records_for_export)
     csv_output.seek(0)
+    
     # Convert StringIO to BytesIO for the document
     csv_bytes = StringIO(csv_output.getvalue()).read().encode('utf-8')
-    await update.message.reply_document(document=csv_bytes, filename=f"export_{datetime.now().strftime('%Y%m%d')}.csv", caption="Here's your data in CSV format.")
+    await update.message.reply_document(document=csv_bytes, filename=f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", caption="Here's your data in CSV format.")
 
     # Define PDF path within the persistent directory
-    pdf_path = os.path.join(DATA_DIR, f"report_{datetime.now().strftime('%Y%m%d')}.pdf")
+    pdf_path = os.path.join(DATA_DIR, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
     
     # Calculate summaries
     totals_saved: Dict[str, float] = {}
@@ -321,10 +322,6 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Clean up the generated PDF file from the persistent disk
         if os.path.exists(pdf_path):
             os.remove(pdf_path)
-
-# ... (The rest of the handlers and the main() function from the original script go here) ...
-# Make sure to include all other functions like start, new_goal_start, cancel, error_handler, main, etc.
-# The following is a placeholder for all the other unchanged functions.
 
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -403,17 +400,29 @@ async def view_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await send_and_delete(update, context, message, parse_mode='Markdown')
 
 async def paginated_list_start(update: Update, context: ContextTypes.DEFAULT_TYPE, prefix: str, state: int) -> int:
-    await update.message.delete()
+    # Use update.effective_chat.id for send_message instead of update.message.chat_id
+    # as update.message might not exist for callback queries.
+    chat_id = update.effective_chat.id
+
+    try:
+        # If the update is a message, delete it. If it's a callback query, it's already "answered" or being edited.
+        if update.message:
+            await update.message.delete()
+    except BadRequest as e:
+        logger.warning(f"Could not delete user's message {update.message.message_id if update.message else 'N/A'}: {e}")
+
     goals = get_user_goals_and_debts(update.effective_user.id)
     if not goals:
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="You have nothing to select from. Create a goal or debt first.")
+        await context.bot.send_message(chat_id=chat_id, text="You have nothing to select from. Create a goal or debt first.")
         return ConversationHandler.END
+    
     reply_markup = generate_paginated_keyboard(goals, prefix=prefix, page=0)
-    await context.bot.send_message(chat_id=update.effective_chat.id, text="Which one are we looking at?", reply_markup=reply_markup)
+    await context.bot.send_message(chat_id=chat_id, text="Which one are we looking at?", reply_markup=reply_markup)
     return state
 
 @restricted
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    logger.info("add_start: Initiating 'add' conversation.")
     return await paginated_list_start(update, context, prefix="add_to", state=ADD_SAVINGS_GOAL)
 
 @restricted
@@ -425,38 +434,68 @@ async def progress_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return await paginated_list_start(update, context, prefix="progress", state=PROGRESS_GOAL_SELECT)
 
 async def navigate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    query = update.callback_query
+    await query.answer() # Acknowledge the callback query
     _nav, prefix, page_str = query.data.split("_", 2)
     page = int(page_str)
     goals = get_user_goals_and_debts(query.from_user.id)
     reply_markup = generate_paginated_keyboard(goals, prefix=prefix, page=page)
-    await query.edit_message_reply_markup(reply_markup)
-    if prefix == "add_to": return ADD_SAVINGS_GOAL
-    if prefix == "delete": return DELETE_GOAL_CONFIRM
-    if prefix == "progress": return PROGRESS_GOAL_SELECT
-    return ConversationHandler.END
+    
+    try:
+        await query.edit_message_reply_markup(reply_markup)
+    except BadRequest as e:
+        logger.warning(f"Failed to edit message reply markup for navigation: {e}")
+        await query.edit_message_text(text="Could not update the list. Please try again.")
+
+    # Importantly, re-enter the current state to allow continuous pagination
+    # without exiting the conversation flow.
+    return ConversationHandler.REENTER
 
 async def select_goal_for_adding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    query = update.callback_query
+    await query.answer()
     goal_id = int(query.data.split("_")[-1])
     context.user_data['selected_goal_id'] = goal_id
     goal = get_goal_by_id(goal_id)
+    if not goal:
+        await query.edit_message_text(text="Error: Goal not found. Please try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
     action = "saving for" if goal[5] == 'goal' else "paying off"
     await query.edit_message_text(text=f"How much are you {action} '{goal[1]}'? ({goal[4]})")
+    logger.info(f"select_goal_for_adding: User selected goal_id {goal_id} for adding.")
     return ADD_SAVINGS_AMOUNT
 
 async def get_amount_and_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    logger.info(f"get_amount_and_save: Received amount text: {update.message.text}")
     try:
         amount = float(update.message.text)
-        goal_id = context.user_data['selected_goal_id']
-        conn = db_connect(); cursor = conn.cursor()
+        goal_id = context.user_data.get('selected_goal_id')
+
+        if goal_id is None:
+            logger.error("get_amount_and_save: selected_goal_id not found in user_data. Conversation state likely lost.")
+            await send_and_delete(update, context, "It seems I forgot which goal we were talking about. Please start the `add` command again.")
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        conn = db_connect()
+        cursor = conn.cursor()
         cursor.execute("INSERT INTO savings (goal_id, amount) VALUES (?, ?)", (goal_id, amount))
         cursor.execute("UPDATE goals SET current_amount = current_amount + ? WHERE id = ?", (amount, goal_id))
         conn.commit()
+        
         goal = get_goal_by_id(goal_id)
+        if not goal:
+            await send_and_delete(update, context, "Successfully recorded, but couldn't retrieve goal details.")
+            conn.close()
+            context.user_data.clear()
+            return ConversationHandler.END
+
         name, target, current, currency, type, notified = goal[1], goal[2], goal[3], goal[4], goal[5], goal[6]
         await send_and_delete(update, context, f"✅ Roger that. {amount:,.2f} {currency} logged for '{name}'.")
-        progress_percent = (current / target) * 100
+        
+        progress_percent = (current / target) * 100 if target > 0 else 0
         if type == 'goal' and progress_percent >= 100:
             await context.bot.send_message(chat_id=update.effective_chat.id, text=f"🎉 **GOAL REACHED!** 🎉\nYou hit your target for '{name}'.")
         elif type == 'goal' and progress_percent >= 90 and not notified:
@@ -464,25 +503,48 @@ async def get_amount_and_save(update: Update, context: ContextTypes.DEFAULT_TYPE
             cursor.execute("UPDATE goals SET notified_90_percent = 1 WHERE id = ?", (goal_id,)); conn.commit()
         elif type == 'debt' and progress_percent >= 100:
              await context.bot.send_message(chat_id=update.effective_chat.id, text=f"✅ **DEBT CLEARED!** ✅\nYou paid off '{name}'. You are free.")
+        
         conn.close()
         context.user_data.clear()
+        logger.info(f"get_amount_and_save: Amount {amount} saved for goal {goal_id}.")
         return ConversationHandler.END
-    except (ValueError, KeyError):
-        await send_and_delete(update, context, "Invalid input. Use `add` to start over.")
+    except ValueError:
+        logger.warning(f"get_amount_and_save: Invalid amount input '{update.message.text}'.")
+        await send_and_delete(update, context, "That's not a valid number. Please enter a numerical amount.")
+        # Do not end conversation here, allow user to retry entering amount
+        return ADD_SAVINGS_AMOUNT # Stay in the same state
+    except KeyError:
+        logger.error("get_amount_and_save: 'selected_goal_id' not found in context.user_data. Likely lost conversation state.")
+        await send_and_delete(update, context, "It seems I lost track of which goal you were adding to. Please start the `add` command again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"An unexpected error occurred in get_amount_and_save: {e}", exc_info=True)
+        await send_and_delete(update, context, "An unexpected error occurred while saving. Please try again.")
         context.user_data.clear()
         return ConversationHandler.END
 
+
 async def confirm_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    query = update.callback_query
+    await query.answer()
     goal_id = int(query.data.split("_")[-1])
-    goal = get_goal_by_id(goal_id); delete_goal_from_db(goal_id)
-    await query.edit_message_text(text=f"Gone. '{goal[1]}' has been vanquished.")
+    goal = get_goal_by_id(goal_id)
+    if goal:
+        delete_goal_from_db(goal_id)
+        await query.edit_message_text(text=f"Gone. '{goal[1]}' has been vanquished.")
+    else:
+        await query.edit_message_text(text="Goal not found or already deleted.")
     return ConversationHandler.END
 
 async def show_goal_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query; await query.answer()
+    query = update.callback_query
+    await query.answer()
     goal_id = int(query.data.split("_")[-1])
     goal = get_goal_by_id(goal_id)
+    if not goal:
+        await query.edit_message_text(text="Error: Goal not found. Please try again.")
+        return ConversationHandler.END
     recent_transactions = get_recent_transactions(goal_id)
     progress_message = fmt_single_goal_progress(goal, recent_transactions)
     await query.edit_message_text(text=progress_message, parse_mode='Markdown')
@@ -511,11 +573,17 @@ async def reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(chat_id=context.job.chat_id, text="🔔 Reminder: Your goals won't meet themselves. Did you save today?")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Determine the appropriate method to respond based on the update type
     if update.callback_query:
-        await update.callback_query.answer()
+        await update.callback_query.answer() # Acknowledge the callback query
         await update.callback_query.edit_message_text(text="Fine, whatever. Mission aborted.")
-    else:
+    elif update.message:
+        # Delete user's message and send a response that also gets deleted
         await send_and_delete(update, context, "Fine, whatever. Mission aborted.")
+    else:
+        # Fallback if neither message nor callback_query exists (unlikely but good for robustness)
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Fine, whatever. Mission aborted.")
+
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -526,8 +594,11 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     update_str = update.to_dict() if isinstance(update, Update) else str(update)
     message = (f"An exception was raised:\n<pre>update = {html.escape(json.dumps(update_str, indent=2, ensure_ascii=False))}"
                f"</pre>\n\n<pre>{html.escape(tb_string)}</pre>")
-    if isinstance(update, Update) and hasattr(update, 'message'):
+    if isinstance(update, Update) and hasattr(update, 'message') and update.message:
         await update.message.reply_text("Looks like I tripped over a bug. Try again, I guess.")
+    elif isinstance(update, Update) and hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.answer("Looks like I tripped over a bug. Try again, I guess.")
+        await update.callback_query.edit_message_text("Looks like I tripped over a bug. Try again, I guess.")
     logger.error(message)
 
 def main() -> None:

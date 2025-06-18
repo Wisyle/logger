@@ -435,22 +435,34 @@ async def progress_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def navigate_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
-    await query.answer() # Acknowledge the callback query
-    _nav, prefix, page_str = query.data.split("_", 2)
-    page = int(page_str)
+    await query.answer()  # Acknowledge the callback query
+
+    try:
+        # The data is in the format "nav_{prefix}_{page}".
+        # The prefix itself might contain underscores (e.g., "add_to").
+        # We remove the "nav_" part and then split from the right to reliably get the page number.
+        data_payload = query.data[4:]  # Removes "nav_"
+        prefix, page_str = data_payload.rsplit('_', 1)
+        page = int(page_str)
+    except (ValueError, IndexError) as e:
+        logger.error(f"Could not parse page number from callback_data: '{query.data}'. Error: {e}")
+        await query.edit_message_text(text="Error processing navigation. Please try again.")
+        return ConversationHandler.REENTER
+
     goals = get_user_goals_and_debts(query.from_user.id)
     reply_markup = generate_paginated_keyboard(goals, prefix=prefix, page=page)
-    
+
     try:
         await query.edit_message_reply_markup(reply_markup)
     except BadRequest as e:
-        logger.warning(f"Failed to edit message reply markup for navigation: {e}")
-        await query.edit_message_text(text="Could not update the list. Please try again.")
+        # This can happen if the keyboard content is identical (e.g., clicking next on the last page with no previous button before)
+        # It's not a critical error, so we log it and continue.
+        if 'Message is not modified' not in str(e):
+             logger.warning(f"Failed to edit message reply markup for navigation: {e}")
+             await query.edit_message_text(text="Could not update the list. Please try again.")
 
-    # Importantly, re-enter the current state to allow continuous pagination
-    # without exiting the conversation flow.
+    # Re-enter the current state to allow for more pagination or selection
     return ConversationHandler.REENTER
-
 async def select_goal_for_adding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()

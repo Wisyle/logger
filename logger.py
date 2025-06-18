@@ -422,7 +422,7 @@ async def paginated_list_start(update: Update, context: ContextTypes.DEFAULT_TYP
 
 @restricted
 async def add_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    logger.info("add_start: Initiating 'add' conversation.")
+    logger.info(f"add_start: Received message: '{update.message.text}'")
     return await paginated_list_start(update, context, prefix="add_to", state=ADD_SAVINGS_GOAL)
 
 @restricted
@@ -636,7 +636,7 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     conv_handler_add = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex(re.compile(r'^add$', re.IGNORECASE)), add_start)],
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^\s*add\s*$', re.IGNORECASE)), add_start)],
         states={
             ADD_SAVINGS_GOAL: [
                 CallbackQueryHandler(navigate_menu, pattern="^nav_add_to_"),

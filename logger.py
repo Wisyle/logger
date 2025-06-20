@@ -684,7 +684,14 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view all$', re.IGNORECASE)), view_all))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^export$', re.IGNORECASE)), export_data))
     application.add_handler(CommandHandler("cancel", cancel))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, unknown_command))
+    
+    # Move unknown_command to the very end and make it more specific
+    # Only catch messages that don't match any of our known patterns
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder)\s*$', re.IGNORECASE)), 
+        unknown_command
+    ))
 
     logger.info("Snarky Savings Bot is online...")
     application.run_polling()

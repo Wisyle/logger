@@ -54,7 +54,7 @@ MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command dec
  DELETE_GOAL_CONFIRM, REMINDER_TIME,
  DEBT_NAME, DEBT_AMOUNT, DEBT_CURRENCY,
  PROGRESS_GOAL_SELECT, EXPENSE_AMOUNT, EXPENSE_REASON, EXPENSE_CURRENCY,
- ASSET_NAME, ASSET_AMOUNT, ASSET_CURRENCY, ASSET_TYPE) = range(17)
+ ASSET_NAME, ASSET_AMOUNT, ASSET_CURRENCY, ASSET_TYPE) = range(18)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -211,118 +211,6 @@ def delete_goal_from_db(goal_id: int):
     cursor.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
     conn.commit()
     conn.close()
-
-# --- Expense & Asset Helper Functions ---
-def get_expenses_by_period(user_id: int, period: str) -> List[Tuple]:
-    """Get expenses for a specific period (today, week, month, all)"""
-    conn = db_connect()
-    cursor = conn.cursor()
-    
-    if period == 'today':
-        cursor.execute("""
-            SELECT amount, currency, reason, created_at 
-            FROM expenses 
-            WHERE user_id = ? AND DATE(created_at) = DATE('now')
-            ORDER BY created_at DESC
-        """, (user_id,))
-    elif period == 'week':
-        cursor.execute("""
-            SELECT amount, currency, reason, created_at 
-            FROM expenses 
-            WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-7 days')
-            ORDER BY created_at DESC
-        """, (user_id,))
-    elif period == 'month':
-        cursor.execute("""
-            SELECT amount, currency, reason, created_at 
-            FROM expenses 
-            WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-30 days')
-            ORDER BY created_at DESC
-        """, (user_id,))
-    else:  # all
-        cursor.execute("""
-            SELECT amount, currency, reason, created_at 
-            FROM expenses 
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-        """, (user_id,))
-    
-    expenses = cursor.fetchall()
-    conn.close()
-    return expenses
-
-def get_expense_totals_by_currency(user_id: int, period: str) -> Dict[str, float]:
-    """Get total expenses grouped by currency for a period"""
-    expenses = get_expenses_by_period(user_id, period)
-    totals = {}
-    for amount, currency, _, _ in expenses:
-        totals[currency] = totals.get(currency, 0) + amount
-    return totals
-
-def get_user_assets(user_id: int) -> List[Tuple]:
-    """Get all assets for a user"""
-    conn = db_connect()
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT id, name, amount, currency, asset_type, created_at, updated_at
-        FROM assets 
-        WHERE user_id = ?
-        ORDER BY asset_type, name
-    """, (user_id,))
-    assets = cursor.fetchall()
-    conn.close()
-    return assets
-
-def fmt_currency_amount(amount: float, currency: str) -> str:
-    """Format currency amounts with proper symbols and formatting"""
-    currency_symbols = {
-        'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'CNY': '¥',
-        'BTC': '₿', 'ETH': 'Ξ', 'ADA': '₳', 'DOT': '●', 'SOL': '◎',
-        'TONE': '🎵', 'NGN': '₦', 'GHS': '₵'
-    }
-    
-    symbol = currency_symbols.get(currency.upper(), currency.upper())
-    
-    if currency.upper() in ['BTC', 'ETH']:
-        return f"{symbol}{amount:.8f}"
-    elif amount >= 1000000:
-        return f"{symbol}{amount/1000000:.2f}M"
-    elif amount >= 1000:
-        return f"{symbol}{amount/1000:.1f}K"
-    else:
-        return f"{symbol}{amount:,.2f}"
-
-def fmt_expense_report(expenses: List[Tuple], period: str) -> str:
-    """Format expense report with nice formatting"""
-    if not expenses:
-        return f"📊 **Expense Report ({period.title()})**\n\n💸 No expenses recorded for this period. Living frugally, I see!"
-    
-    # Group by currency
-    totals = {}
-    expense_lines = []
-    
-    for amount, currency, reason, created_at in expenses:
-        totals[currency] = totals.get(currency, 0) + amount
-        date_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
-        formatted_date = date_obj.strftime('%b %d')
-        expense_lines.append(f"  • {fmt_currency_amount(amount, currency)} - {reason} ({formatted_date})")
-    
-    # Build report
-    report = f"📊 **Expense Report ({period.title()})**\n\n"
-    
-    # Summary
-    report += "💰 **Summary:**\n"
-    for currency, total in totals.items():
-        report += f"  {fmt_currency_amount(total, currency)}\n"
-    
-    report += f"\n📝 **Transactions ({len(expenses)}):**\n"
-    for line in expense_lines[:10]:  # Show max 10 recent transactions
-        report += line + "\n"
-    
-    if len(expenses) > 10:
-        report += f"  ... and {len(expenses) - 10} more transactions\n"
-    
-    return report
 
 # --- Expense & Asset Helper Functions ---
 def get_expenses_by_period(user_id: int, period: str) -> List[Tuple]:

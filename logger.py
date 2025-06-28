@@ -32,7 +32,7 @@ from reportlab.lib.units import inch
 # --- Configuration & Constants ---
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ALLOWED_USER_ID = 5134940733  # Replace with your actual user ID
+ALLOWED_USER_IDS = [5134940733, 8074969502]  # List of allowed user IDs
 MESSAGE_DELETION_DELAY = 300  # 5 minutes in seconds
 ITEMS_PER_PAGE = 5  # For paginated keyboards
 
@@ -44,6 +44,8 @@ STARTUP_MESSAGES = [
 MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command deck. Let's make some magic happen (or at least track it).\n\n"
                "🎯 **Goals & Debts**\n  - `new goal`\n  - `new debt`\n  - `view all`\n  - `delete`\n\n"
                "💰 **Money Moves**\n  - `add`\n  - `progress`\n\n"
+               "💸 **Expense Tracking**\n  - `add expense`\n  - `expense report`\n  - `expense compare`\n\n"
+               "🏦 **Asset Tracking**\n  - `add asset`\n  - `view assets`\n  - `asset summary`\n\n"
                "🛠️ **Utilities**\n  - `set reminder`\n  - `export`\n  - `cancel`")
 
 # --- States for ConversationHandler ---
@@ -51,7 +53,8 @@ MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command dec
  ADD_SAVINGS_GOAL, ADD_SAVINGS_AMOUNT,
  DELETE_GOAL_CONFIRM, REMINDER_TIME,
  DEBT_NAME, DEBT_AMOUNT, DEBT_CURRENCY,
- PROGRESS_GOAL_SELECT) = range(11)
+ PROGRESS_GOAL_SELECT, EXPENSE_AMOUNT, EXPENSE_REASON, EXPENSE_CURRENCY,
+ ASSET_NAME, ASSET_AMOUNT, ASSET_CURRENCY, ASSET_TYPE) = range(17)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -87,6 +90,21 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT, goal_id INTEGER NOT NULL,
             amount REAL NOT NULL, saved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (goal_id) REFERENCES goals (id) ON DELETE CASCADE
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            amount REAL NOT NULL, currency TEXT NOT NULL,
+            reason TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS assets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            name TEXT NOT NULL, amount REAL NOT NULL, currency TEXT NOT NULL,
+            asset_type TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
@@ -194,41 +212,303 @@ def delete_goal_from_db(goal_id: int):
     conn.commit()
     conn.close()
 
+# --- Expense & Asset Helper Functions ---
+def get_expenses_by_period(user_id: int, period: str) -> List[Tuple]:
+    """Get expenses for a specific period (today, week, month, all)"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    
+    if period == 'today':
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ? AND DATE(created_at) = DATE('now')
+            ORDER BY created_at DESC
+        """, (user_id,))
+    elif period == 'week':
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-7 days')
+            ORDER BY created_at DESC
+        """, (user_id,))
+    elif period == 'month':
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-30 days')
+            ORDER BY created_at DESC
+        """, (user_id,))
+    else:  # all
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+        """, (user_id,))
+    
+    expenses = cursor.fetchall()
+    conn.close()
+    return expenses
+
+def get_expense_totals_by_currency(user_id: int, period: str) -> Dict[str, float]:
+    """Get total expenses grouped by currency for a period"""
+    expenses = get_expenses_by_period(user_id, period)
+    totals = {}
+    for amount, currency, _, _ in expenses:
+        totals[currency] = totals.get(currency, 0) + amount
+    return totals
+
+def get_user_assets(user_id: int) -> List[Tuple]:
+    """Get all assets for a user"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, amount, currency, asset_type, created_at, updated_at
+        FROM assets 
+        WHERE user_id = ?
+        ORDER BY asset_type, name
+    """, (user_id,))
+    assets = cursor.fetchall()
+    conn.close()
+    return assets
+
+def fmt_currency_amount(amount: float, currency: str) -> str:
+    """Format currency amounts with proper symbols and formatting"""
+    currency_symbols = {
+        'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'CNY': '¥',
+        'BTC': '₿', 'ETH': 'Ξ', 'ADA': '₳', 'DOT': '●', 'SOL': '◎',
+        'TONE': '🎵', 'NGN': '₦', 'GHS': '₵'
+    }
+    
+    symbol = currency_symbols.get(currency.upper(), currency.upper())
+    
+    if currency.upper() in ['BTC', 'ETH']:
+        return f"{symbol}{amount:.8f}"
+    elif amount >= 1000000:
+        return f"{symbol}{amount/1000000:.2f}M"
+    elif amount >= 1000:
+        return f"{symbol}{amount/1000:.1f}K"
+    else:
+        return f"{symbol}{amount:,.2f}"
+
+def fmt_expense_report(expenses: List[Tuple], period: str) -> str:
+    """Format expense report with nice formatting"""
+    if not expenses:
+        return f"📊 **Expense Report ({period.title()})**\n\n💸 No expenses recorded for this period. Living frugally, I see!"
+    
+    # Group by currency
+    totals = {}
+    expense_lines = []
+    
+    for amount, currency, reason, created_at in expenses:
+        totals[currency] = totals.get(currency, 0) + amount
+        date_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+        formatted_date = date_obj.strftime('%b %d')
+        expense_lines.append(f"  • {fmt_currency_amount(amount, currency)} - {reason} ({formatted_date})")
+    
+    # Build report
+    report = f"📊 **Expense Report ({period.title()})**\n\n"
+    
+    # Summary
+    report += "💰 **Summary:**\n"
+    for currency, total in totals.items():
+        report += f"  {fmt_currency_amount(total, currency)}\n"
+    
+    report += f"\n📝 **Transactions ({len(expenses)}):**\n"
+    for line in expense_lines[:10]:  # Show max 10 recent transactions
+        report += line + "\n"
+    
+    if len(expenses) > 10:
+        report += f"  ... and {len(expenses) - 10} more transactions\n"
+    
+    return report
+
+# --- Expense & Asset Helper Functions ---
+def get_expenses_by_period(user_id: int, period: str) -> List[Tuple]:
+    """Get expenses for a specific period (today, week, month, all)"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    
+    if period == 'today':
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ? AND DATE(created_at) = DATE('now')
+            ORDER BY created_at DESC
+        """, (user_id,))
+    elif period == 'week':
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-7 days')
+            ORDER BY created_at DESC
+        """, (user_id,))
+    elif period == 'month':
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-30 days')
+            ORDER BY created_at DESC
+        """, (user_id,))
+    else:  # all
+        cursor.execute("""
+            SELECT amount, currency, reason, created_at 
+            FROM expenses 
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+        """, (user_id,))
+    
+    expenses = cursor.fetchall()
+    conn.close()
+    return expenses
+
+def get_expense_totals_by_currency(user_id: int, period: str) -> Dict[str, float]:
+    """Get total expenses grouped by currency for a period"""
+    expenses = get_expenses_by_period(user_id, period)
+    totals = {}
+    for amount, currency, _, _ in expenses:
+        totals[currency] = totals.get(currency, 0) + amount
+    return totals
+
+def get_user_assets(user_id: int) -> List[Tuple]:
+    """Get all assets for a user"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, amount, currency, asset_type, created_at, updated_at
+        FROM assets 
+        WHERE user_id = ?
+        ORDER BY asset_type, name
+    """, (user_id,))
+    assets = cursor.fetchall()
+    conn.close()
+    return assets
+
+def fmt_currency_amount(amount: float, currency: str) -> str:
+    """Format currency amounts with proper symbols and formatting"""
+    currency_symbols = {
+        'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'CNY': '¥',
+        'BTC': '₿', 'ETH': 'Ξ', 'ADA': '₳', 'DOT': '●', 'SOL': '◎',
+        'TONE': '🎵', 'NGN': '₦', 'GHS': '₵'
+    }
+    
+    symbol = currency_symbols.get(currency.upper(), currency.upper())
+    
+    if currency.upper() in ['BTC', 'ETH']:
+        return f"{symbol}{amount:.8f}"
+    elif amount >= 1000000:
+        return f"{symbol}{amount/1000000:.2f}M"
+    elif amount >= 1000:
+        return f"{symbol}{amount/1000:.1f}K"
+    else:
+        return f"{symbol}{amount:,.2f}"
+
+def fmt_expense_report(expenses: List[Tuple], period: str) -> str:
+    """Format expense report with nice formatting"""
+    if not expenses:
+        return f"📊 **Expense Report ({period.title()})**\n\n💸 No expenses recorded for this period. Living frugally, I see!"
+    
+    # Group by currency
+    totals = {}
+    expense_lines = []
+    
+    for amount, currency, reason, created_at in expenses:
+        totals[currency] = totals.get(currency, 0) + amount
+        date_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+        formatted_date = date_obj.strftime('%b %d')
+        expense_lines.append(f"  • {fmt_currency_amount(amount, currency)} - {reason} ({formatted_date})")
+    
+    # Build report
+    report = f"📊 **Expense Report ({period.title()})**\n\n"
+    
+    # Summary
+    report += "💰 **Summary:**\n"
+    for currency, total in totals.items():
+        report += f"  {fmt_currency_amount(total, currency)}\n"
+    
+    report += f"\n📝 **Transactions ({len(expenses)}):**\n"
+    for line in expense_lines[:10]:  # Show max 10 recent transactions
+        report += line + "\n"
+    
+    if len(expenses) > 10:
+        report += f"  ... and {len(expenses) - 10} more transactions\n"
+    
+    return report
+
+def fmt_expense_comparison(current_totals: Dict[str, float], previous_totals: Dict[str, float], period: str) -> str:
+    """Format expense comparison between periods"""
+    if not current_totals and not previous_totals:
+        return f"📈 **Expense Comparison**\n\nNo data for comparison in {period} periods."
+    
+    comparison = f"📈 **Expense Comparison ({period.title()})**\n\n"
+    
+    all_currencies = set(current_totals.keys()) | set(previous_totals.keys())
+    
+    for currency in sorted(all_currencies):
+        current = current_totals.get(currency, 0)
+        previous = previous_totals.get(currency, 0)
+        
+        if previous == 0 and current > 0:
+            change_text = "🆕 New spending"
+        elif current == 0 and previous > 0:
+            change_text = "✅ No spending (was spending before)"
+        elif current == previous:
+            change_text = "➖ No change"
+        else:
+            diff = current - previous
+            percentage = (diff / previous * 100) if previous > 0 else 0
+            if diff > 0:
+                change_text = f"📈 +{fmt_currency_amount(abs(diff), currency)} ({percentage:+.1f}%)"
+            else:
+                change_text = f"📉 -{fmt_currency_amount(abs(diff), currency)} ({percentage:+.1f}%)"
+        
+        comparison += f"**{currency}:**\n"
+        comparison += f"  Current: {fmt_currency_amount(current, currency)}\n"
+        comparison += f"  Previous: {fmt_currency_amount(previous, currency)}\n"
+        comparison += f"  Change: {change_text}\n\n"
+    
+    return comparison
+
+def fmt_asset_summary(assets: List[Tuple]) -> str:
+    """Format asset summary with nice formatting"""
+    if not assets:
+        return "🏦 **Asset Portfolio**\n\n💰 Your vault is empty. Time to start building wealth!"
+    
+    # Group by asset type and currency
+    by_type = {}
+    totals_by_currency = {}
+    
+    for asset_id, name, amount, currency, asset_type, created_at, updated_at in assets:
+        if asset_type not in by_type:
+            by_type[asset_type] = []
+        by_type[asset_type].append((name, amount, currency))
+        totals_by_currency[currency] = totals_by_currency.get(currency, 0) + amount
+    
+    summary = "🏦 **Asset Portfolio**\n\n"
+    
+    # Total summary
+    summary += "💎 **Total Value:**\n"
+    for currency, total in sorted(totals_by_currency.items()):
+        summary += f"  {fmt_currency_amount(total, currency)}\n"
+    
+    summary += "\n📊 **By Category:**\n"
+    
+    type_emojis = {
+        'cash': '💵', 'crypto': '₿', 'stocks': '📈', 'bonds': '🏛️',
+        'real_estate': '🏠', 'commodities': '🥇', 'other': '💼'
+    }
+    
+    for asset_type, type_assets in by_type.items():
+        emoji = type_emojis.get(asset_type.lower(), '💼')
+        summary += f"\n{emoji} **{asset_type.title()}:**\n"
+        
+        for name, amount, currency in type_assets:
+            summary += f"  • {name}: {fmt_currency_amount(amount, currency)}\n"
+    
+    return summary
+
 # --- PDF Generation ---
-def generate_pdf_report(records: List[Tuple], summary_data: List[List[str]], pdf_path: str):
-    doc = SimpleDocTemplate(pdf_path, pagesize=letter)
-    styles = getSampleStyleSheet()
-    elements = []
-    elements.append(Paragraph("Savings & Debts Report", styles['Title']))
-    elements.append(Spacer(1, 12))
-    elements.append(Paragraph("Summary", styles['h2']))
-    summary_table = Table(summary_data, colWidths=[2.5 * inch, 2.5 * inch])
-    summary_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.grey), ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'), ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 12), ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ('SPAN', (0, 0), (1, 0)),
-    ]))
-    elements.append(summary_table)
-    elements.append(Spacer(1, 24))
-    elements.append(Paragraph("Transaction History", styles['h2']))
-    header = ["Name", "Type", "Amount", "Currency", "Date"]
-    table_data = [header] + [[r[0], r[1], f"{r[4]:,.2f}", r[3], datetime.strptime(r[5], '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d')] for r in records]
-    records_table = Table(table_data, colWidths=[2*inch, 0.8*inch, 1*inch, 1*inch, 1.5*inch])
-    style = TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue), ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'), ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('GRID', (0, 0), (-1, -1), 1, colors.black),
-    ])
-    for i in range(1, len(table_data)):
-        bg_color = colors.lightblue if i % 2 == 0 else colors.beige
-        style.add('BACKGROUND', (0, i), (-1, i), bg_color)
-    records_table.setStyle(style)
-    elements.append(records_table)
-    doc.build(elements)
-
-
-# --- Message Handling & Decorators (No changes from original) ---
 async def delete_message_later(context: ContextTypes.DEFAULT_TYPE):
     try:
         await context.bot.delete_message(chat_id=context.job.chat_id, message_id=context.job.data['message_id'])
@@ -248,7 +528,7 @@ async def send_and_delete(update: Update, context: ContextTypes.DEFAULT_TYPE, te
 def restricted(func):
     @wraps(func)
     async def wrapped(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        if update.effective_user.id != ALLOWED_USER_ID:
+        if update.effective_user.id not in ALLOWED_USER_IDS:
             await (update.message or update.callback_query).reply_text("⛔️ Access Denied. I'm a one-person bot. And you're not that person.")
             return
         return await func(update, context, *args, **kwargs)
@@ -262,9 +542,9 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text("Brewing up your financial reports...")
     conn = db_connect()
     cursor = conn.cursor()
-    cursor.execute("SELECT g.name, g.type, g.target_amount, g.currency, s.amount, s.saved_at FROM goals g JOIN savings s ON g.id = s.goal_id WHERE g.user_id = ? ORDER BY g.name, s.saved_at", (ALLOWED_USER_ID,))
+    cursor.execute("SELECT g.name, g.type, g.target_amount, g.currency, s.amount, s.saved_at FROM goals g JOIN savings s ON g.id = s.goal_id WHERE g.user_id = ? ORDER BY g.name, s.saved_at", (update.effective_user.id,))
     records = cursor.fetchall()
-    goals_summary = get_user_goals_and_debts(ALLOWED_USER_ID)
+    goals_summary = get_user_goals_and_debts(update.effective_user.id)
     conn.close()
 
     if not records:
@@ -352,7 +632,7 @@ async def get_goal_currency_and_save(update: Update, context: ContextTypes.DEFAU
     try:
         conn = db_connect()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO goals (user_id, name, target_amount, currency, type) VALUES (?, ?, ?, ?, ?)", (ALLOWED_USER_ID, context.user_data['goal_name'], context.user_data['goal_amount'], currency, 'goal'))
+        cursor.execute("INSERT INTO goals (user_id, name, target_amount, currency, type) VALUES (?, ?, ?, ?, ?)", (update.effective_user.id, context.user_data['goal_name'], context.user_data['goal_amount'], currency, 'goal'))
         conn.commit()
         await send_and_delete(update, context, f"✅ Goal set. Don't let '{context.user_data['goal_name']}' become a forgotten dream.")
     except sqlite3.IntegrityError:
@@ -383,7 +663,7 @@ async def get_debt_currency_and_save(update: Update, context: ContextTypes.DEFAU
     try:
         conn = db_connect()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO goals (user_id, name, target_amount, currency, type) VALUES (?, ?, ?, ?, ?)", (ALLOWED_USER_ID, context.user_data['debt_name'], context.user_data['debt_amount'], currency, 'debt'))
+        cursor.execute("INSERT INTO goals (user_id, name, target_amount, currency, type) VALUES (?, ?, ?, ?, ?)", (update.effective_user.id, context.user_data['debt_name'], context.user_data['debt_amount'], currency, 'debt'))
         conn.commit()
         await send_and_delete(update, context, f"✅ Debt logged. Let's start chipping away at '{context.user_data['debt_name']}'.")
     except sqlite3.IntegrityError:
@@ -611,6 +891,176 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.callback_query.edit_message_text("Looks like I tripped over a bug. Try again, I guess.")
     logger.error(message)
 
+# --- Expense Tracking Handlers ---
+@restricted
+async def add_expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send_and_delete(update, context, "💸 Time to face the music. How much did you spend?")
+    return EXPENSE_AMOUNT
+
+async def get_expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        context.user_data['expense_amount'] = float(update.message.text)
+        await send_and_delete(update, context, "Currency? (e.g., USD, EUR, BTC)")
+        return EXPENSE_CURRENCY
+    except ValueError:
+        await send_and_delete(update, context, "That's not a number. Try again.")
+        return EXPENSE_AMOUNT
+
+async def get_expense_currency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['expense_currency'] = update.message.text.upper()
+    await send_and_delete(update, context, "What was this expense for? (e.g., Food, Transport, Shopping)")
+    return EXPENSE_REASON
+
+async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    reason = update.message.text
+    amount = context.user_data['expense_amount']
+    currency = context.user_data['expense_currency']
+    
+    try:
+        conn = db_connect()
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO expenses (user_id, amount, currency, reason) VALUES (?, ?, ?, ?)",
+            (update.effective_user.id, amount, currency, reason)
+        )
+        conn.commit()
+        conn.close()
+        
+        formatted_amount = fmt_currency_amount(amount, currency)
+        await send_and_delete(update, context, f"💸 Expense recorded: {formatted_amount} for {reason}")
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error saving expense: {e}")
+        await send_and_delete(update, context, "Error saving expense. Try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+@restricted
+async def expense_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    
+    # Get expenses for different periods
+    today_expenses = get_expenses_by_period(user_id, 'today')
+    week_expenses = get_expenses_by_period(user_id, 'week')
+    month_expenses = get_expenses_by_period(user_id, 'month')
+    
+    # Format reports
+    today_report = fmt_expense_report(today_expenses, 'today')
+    week_report = fmt_expense_report(week_expenses, 'week')
+    
+    # Send reports
+    await send_and_delete(update, context, today_report, parse_mode='Markdown')
+    await send_and_delete(update, context, week_report, parse_mode='Markdown')
+
+@restricted
+async def expense_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    
+    # Get current and previous week totals
+    current_week = get_expense_totals_by_currency(user_id, 'week')
+    
+    # Get previous week (14-7 days ago)
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT amount, currency
+        FROM expenses 
+        WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-14 days') 
+        AND DATE(created_at) < DATE('now', '-7 days')
+    """, (user_id,))
+    previous_week_data = cursor.fetchall()
+    conn.close()
+    
+    previous_week = {}
+    for amount, currency in previous_week_data:
+        previous_week[currency] = previous_week.get(currency, 0) + amount
+    
+    comparison = fmt_expense_comparison(current_week, previous_week, 'week')
+    await send_and_delete(update, context, comparison, parse_mode='Markdown')
+
+# --- Asset Tracking Handlers ---
+@restricted
+async def add_asset_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send_and_delete(update, context, "🏦 Building wealth, I see. What's the asset name? (e.g., 'Savings Account', 'Bitcoin Wallet')")
+    return ASSET_NAME
+
+async def get_asset_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['asset_name'] = update.message.text
+    await send_and_delete(update, context, f"How much {context.user_data['asset_name']} do you have?")
+    return ASSET_AMOUNT
+
+async def get_asset_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        context.user_data['asset_amount'] = float(update.message.text)
+        await send_and_delete(update, context, "Currency? (e.g., USD, BTC, ETH)")
+        return ASSET_CURRENCY
+    except ValueError:
+        await send_and_delete(update, context, "That's not a number. Try again.")
+        return ASSET_AMOUNT
+
+async def get_asset_currency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['asset_currency'] = update.message.text.upper()
+    await send_and_delete(update, context, "Asset type? (cash, crypto, stocks, bonds, real_estate, commodities, other)")
+    return ASSET_TYPE
+
+async def save_asset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    asset_type = update.message.text.lower()
+    name = context.user_data['asset_name']
+    amount = context.user_data['asset_amount']
+    currency = context.user_data['asset_currency']
+    
+    try:
+        conn = db_connect()
+        cursor = conn.cursor()
+        
+        # Check if asset already exists, update if it does
+        cursor.execute(
+            "SELECT id FROM assets WHERE user_id = ? AND name = ? AND currency = ?",
+            (update.effective_user.id, name, currency)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            cursor.execute(
+                "UPDATE assets SET amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (amount, existing[0])
+            )
+            action = "updated"
+        else:
+            cursor.execute(
+                "INSERT INTO assets (user_id, name, amount, currency, asset_type) VALUES (?, ?, ?, ?, ?)",
+                (update.effective_user.id, name, amount, currency, asset_type)
+            )
+            action = "added"
+        
+        conn.commit()
+        conn.close()
+        
+        formatted_amount = fmt_currency_amount(amount, currency)
+        await send_and_delete(update, context, f"🏦 Asset {action}: {name} - {formatted_amount}")
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error saving asset: {e}")
+        await send_and_delete(update, context, "Error saving asset. Try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+@restricted
+async def view_assets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assets = get_user_assets(update.effective_user.id)
+    summary = fmt_asset_summary(assets)
+    await send_and_delete(update, context, summary, parse_mode='Markdown')
+
+@restricted
+async def asset_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    assets = get_user_assets(update.effective_user.id)
+    summary = fmt_asset_summary(assets)
+    await send_and_delete(update, context, summary, parse_mode='Markdown')
+
 def main() -> None:
     init_db()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
@@ -671,6 +1121,25 @@ def main() -> None:
         states={REMINDER_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_reminder_time)]},
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    conv_handler_add_expense = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^add expense$', re.IGNORECASE)), add_expense_start)],
+        states={
+            EXPENSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_amount)],
+            EXPENSE_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_currency)],
+            EXPENSE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_expense)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    conv_handler_add_asset = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^add asset$', re.IGNORECASE)), add_asset_start)],
+        states={
+            ASSET_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_asset_name)],
+            ASSET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_asset_amount)],
+            ASSET_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_asset_currency)],
+            ASSET_TYPE: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_asset)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
     application.add_handler(conv_handler_new_goal)
     application.add_handler(conv_handler_new_debt)
@@ -678,18 +1147,24 @@ def main() -> None:
     application.add_handler(conv_handler_delete)
     application.add_handler(conv_handler_progress)
     application.add_handler(conv_handler_reminder)
+    application.add_handler(conv_handler_add_expense)
+    application.add_handler(conv_handler_add_asset)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view all$', re.IGNORECASE)), view_all))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^export$', re.IGNORECASE)), export_data))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^expense report$', re.IGNORECASE)), expense_report))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^expense compare$', re.IGNORECASE)), expense_compare))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view assets$', re.IGNORECASE)), view_assets))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^asset summary$', re.IGNORECASE)), asset_summary))
     application.add_handler(CommandHandler("cancel", cancel))
     
     # Move unknown_command to the very end and make it more specific
     # Only catch messages that don't match any of our known patterns
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & 
-        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder)\s*$', re.IGNORECASE)), 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|view assets|asset summary)\s*$', re.IGNORECASE)), 
         unknown_command
     ))
 

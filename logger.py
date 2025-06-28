@@ -45,7 +45,7 @@ MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command dec
                "🎯 **Goals & Debts**\n  - `new goal`\n  - `new debt`\n  - `view all`\n  - `delete`\n\n"
                "💰 **Money Moves**\n  - `add`\n  - `progress`\n\n"
                "💸 **Expense Tracking**\n  - `add expense`\n  - `expense report`\n  - `expense compare`\n\n"
-               "🏦 **Asset Tracking**\n  - `add asset`\n  - `view assets`\n  - `asset summary`\n\n"
+               "🏦 **Asset Tracking**\n  - `add asset`\n  - `update asset`\n  - `view assets`\n  - `asset summary`\n\n"
                "🛠️ **Utilities**\n  - `set reminder`\n  - `export`\n  - `cancel`")
 
 # --- States for ConversationHandler ---
@@ -54,7 +54,8 @@ MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command dec
  DELETE_GOAL_CONFIRM, REMINDER_TIME,
  DEBT_NAME, DEBT_AMOUNT, DEBT_CURRENCY,
  PROGRESS_GOAL_SELECT, EXPENSE_AMOUNT, EXPENSE_REASON, EXPENSE_CURRENCY,
- ASSET_NAME, ASSET_AMOUNT, ASSET_CURRENCY, ASSET_TYPE) = range(18)
+ ASSET_NAME, ASSET_AMOUNT, ASSET_CURRENCY, ASSET_TYPE,
+ UPDATE_ASSET_SELECT, UPDATE_ASSET_AMOUNT) = range(20)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -180,6 +181,34 @@ def generate_paginated_keyboard(items: List[Tuple], prefix: str, page: int = 0) 
 
     return InlineKeyboardMarkup(keyboard)
 
+def generate_asset_keyboard(assets: List[Tuple], prefix: str, page: int = 0) -> InlineKeyboardMarkup:
+    """Creates a paginated inline keyboard for assets."""
+    keyboard = []
+    start_index = page * ITEMS_PER_PAGE
+    end_index = start_index + ITEMS_PER_PAGE
+
+    for asset in assets[start_index:end_index]:
+        asset_id, name, amount, currency, asset_type, _, _ = asset
+        type_emojis = {
+            'cash': '💵', 'crypto': '₿', 'stocks': '📈', 'bonds': '🏛️',
+            'real_estate': '🏠', 'commodities': '🥇', 'other': '💼'
+        }
+        emoji = type_emojis.get(asset_type.lower(), '💼')
+        formatted_amount = fmt_currency_amount(amount, currency)
+        button = InlineKeyboardButton(f"{emoji} {name} ({formatted_amount})", callback_data=f"{prefix}_{asset_id}")
+        keyboard.append([button])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"nav_{prefix}_{page - 1}"))
+    if end_index < len(assets):
+        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"nav_{prefix}_{page + 1}"))
+
+    if nav_row:
+        keyboard.append(nav_row)
+
+    return InlineKeyboardMarkup(keyboard)
+
 # --- Database Access Functions (No changes from original) ---
 def get_user_goals_and_debts(user_id: int) -> List[Tuple]:
     conn = db_connect()
@@ -272,6 +301,48 @@ def get_user_assets(user_id: int) -> List[Tuple]:
     assets = cursor.fetchall()
     conn.close()
     return assets
+
+def get_asset_by_id(asset_id: int) -> Optional[Tuple]:
+    """Get a specific asset by ID"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, amount, currency, asset_type, created_at, updated_at
+        FROM assets 
+        WHERE id = ?
+    """, (asset_id,))
+    asset = cursor.fetchone()
+    conn.close()
+    return asset
+
+def update_asset_amount(asset_id: int, amount_change: float, operation: str) -> bool:
+    """Update asset amount by adding or subtracting"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    
+    try:
+        if operation == 'add':
+            cursor.execute("""
+                UPDATE assets 
+                SET amount = amount + ?, updated_at = CURRENT_TIMESTAMP 
+                WHERE id = ?
+            """, (amount_change, asset_id))
+        elif operation == 'subtract':
+            cursor.execute("""
+                UPDATE assets 
+                SET amount = amount - ?, updated_at = CURRENT_TIMESTAMP 
+                WHERE id = ?
+            """, (amount_change, asset_id))
+        else:
+            return False
+            
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error updating asset: {e}")
+        return False
+    finally:
+        conn.close()
 
 def fmt_currency_amount(amount: float, currency: str) -> str:
     """Format currency amounts with proper symbols and formatting"""
@@ -949,6 +1020,152 @@ async def asset_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     summary = fmt_asset_summary(assets)
     await send_and_delete(update, context, summary, parse_mode='Markdown')
 
+@restricted
+async def update_asset_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        if update.message:
+            await update.message.delete()
+    except BadRequest as e:
+        logger.warning(f"Could not delete user's message: {e}")
+
+    assets = get_user_assets(update.effective_user.id)
+    if not assets:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="🏦 No assets found. Use `add asset` to create one first.")
+        return ConversationHandler.END
+    
+    reply_markup = generate_asset_keyboard(assets, prefix="update_asset", page=0)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="💼 Which asset do you want to update?", reply_markup=reply_markup)
+    return UPDATE_ASSET_SELECT
+
+async def navigate_asset_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        data_payload = query.data[4:]  # Removes "nav_"
+        prefix, page_str = data_payload.rsplit('_', 1)
+        page = int(page_str)
+    except (ValueError, IndexError) as e:
+        logger.error(f"Could not parse page number from callback_data: '{query.data}'. Error: {e}")
+        await query.edit_message_text(text="Error processing navigation. Please try again.")
+        return
+
+    assets = get_user_assets(query.from_user.id)
+    reply_markup = generate_asset_keyboard(assets, prefix=prefix, page=page)
+
+    try:
+        await query.edit_message_reply_markup(reply_markup)
+    except BadRequest as e:
+        if 'Message is not modified' not in str(e):
+             logger.warning(f"Failed to edit message reply markup for navigation: {e}")
+             await query.edit_message_text(text="Could not update the list. Please try again.")
+
+async def select_asset_for_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    asset_id = int(query.data.split("_")[-1])
+    context.user_data['selected_asset_id'] = asset_id
+    
+    asset = get_asset_by_id(asset_id)
+    if not asset:
+        await query.edit_message_text(text="❌ Error: Asset not found. Please try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    asset_id, name, amount, currency, asset_type, _, _ = asset
+    formatted_amount = fmt_currency_amount(amount, currency)
+    
+    await query.edit_message_text(
+        text=f"💼 **{name}** ({asset_type.title()})\n"
+             f"Current: {formatted_amount}\n\n"
+             f"Enter the amount to add (+) or subtract (-):\n"
+             f"Examples: `+500`, `-250`, `+0.5`"
+    )
+    return UPDATE_ASSET_AMOUNT
+
+async def process_asset_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        amount_text = update.message.text.strip()
+        asset_id = context.user_data.get('selected_asset_id')
+
+        if asset_id is None:
+            await send_and_delete(update, context, "❌ Lost track of which asset we were updating. Please start again.")
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        # Parse the amount and operation
+        if amount_text.startswith('+'):
+            operation = 'add'
+            amount = float(amount_text[1:])
+        elif amount_text.startswith('-'):
+            operation = 'subtract'
+            amount = float(amount_text[1:])
+        else:
+            # If no sign, assume it's an addition
+            operation = 'add'
+            amount = float(amount_text)
+
+        if amount <= 0:
+            await send_and_delete(update, context, "❌ Amount must be greater than 0. Try again.")
+            return UPDATE_ASSET_AMOUNT
+
+        # Get asset details before update
+        asset = get_asset_by_id(asset_id)
+        if not asset:
+            await send_and_delete(update, context, "❌ Asset not found. Please try again.")
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        old_amount = asset[2]
+        name = asset[1]
+        currency = asset[3]
+        asset_type = asset[4]
+
+        # Update the asset
+        success = update_asset_amount(asset_id, amount, operation)
+        
+        if success:
+            # Get updated asset details
+            updated_asset = get_asset_by_id(asset_id)
+            new_amount = updated_asset[2]
+            
+            # Format the response
+            old_formatted = fmt_currency_amount(old_amount, currency)
+            new_formatted = fmt_currency_amount(new_amount, currency)
+            change_formatted = fmt_currency_amount(amount, currency)
+            
+            operation_symbol = "+" if operation == 'add' else "-"
+            operation_text = "Added" if operation == 'add' else "Subtracted"
+            
+            type_emojis = {
+                'cash': '💵', 'crypto': '₿', 'stocks': '📈', 'bonds': '🏛️',
+                'real_estate': '🏠', 'commodities': '🥇', 'other': '💼'
+            }
+            emoji = type_emojis.get(asset_type.lower(), '💼')
+            
+            response = (f"✅ **Asset Updated Successfully!**\n\n"
+                       f"{emoji} **{name}** ({asset_type.title()})\n"
+                       f"Previous: `{old_formatted}`\n"
+                       f"Change: `{operation_symbol}{change_formatted}`\n"
+                       f"**New Total: `{new_formatted}`**")
+            
+            await send_and_delete(update, context, response, parse_mode='Markdown')
+        else:
+            await send_and_delete(update, context, "❌ Failed to update asset. Please try again.")
+
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    except ValueError:
+        await send_and_delete(update, context, "❌ Invalid amount format. Use +100, -50, or just 100")
+        return UPDATE_ASSET_AMOUNT
+    except Exception as e:
+        logger.error(f"Error in process_asset_update: {e}")
+        await send_and_delete(update, context, "❌ An error occurred. Please try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
 def main() -> None:
     init_db()
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).connect_timeout(30).read_timeout(30).build()
@@ -1028,6 +1245,17 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    conv_handler_update_asset = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^update asset$', re.IGNORECASE)), update_asset_start)],
+        states={
+            UPDATE_ASSET_SELECT: [
+                CallbackQueryHandler(navigate_asset_menu, pattern="^nav_update_asset_"),
+                CallbackQueryHandler(select_asset_for_update, pattern="^update_asset_"),
+            ],
+            UPDATE_ASSET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_asset_update)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
     application.add_handler(conv_handler_new_goal)
     application.add_handler(conv_handler_new_debt)
@@ -1037,6 +1265,7 @@ def main() -> None:
     application.add_handler(conv_handler_reminder)
     application.add_handler(conv_handler_add_expense)
     application.add_handler(conv_handler_add_asset)
+    application.add_handler(conv_handler_update_asset)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
@@ -1052,7 +1281,7 @@ def main() -> None:
     # Only catch messages that don't match any of our known patterns
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & 
-        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|view assets|asset summary)\s*$', re.IGNORECASE)), 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|view assets|asset summary)\s*$', re.IGNORECASE)), 
         unknown_command
     ))
 

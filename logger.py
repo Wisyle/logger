@@ -45,7 +45,7 @@ MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command dec
                "🎯 **Goals & Debts**\n  - `new goal`\n  - `new debt`\n  - `view all`\n  - `delete`\n\n"
                "💰 **Money Moves**\n  - `add`\n  - `progress`\n\n"
                "💸 **Expense Tracking**\n  - `add expense`\n  - `expense report`\n  - `expense compare`\n\n"
-               "🏦 **Asset Tracking**\n  - `add asset`\n  - `update asset`\n  - `view assets`\n  - `asset summary`\n\n"
+               "🏦 **Asset Tracking**\n  - `add asset`\n  - `update asset`\n  - `view assets`\n  - `delete asset`\n  - `view all assets`\n\n"
                "🛠️ **Utilities**\n  - `set reminder`\n  - `export`\n  - `cancel`")
 
 # --- States for ConversationHandler ---
@@ -55,7 +55,7 @@ MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command dec
  DEBT_NAME, DEBT_AMOUNT, DEBT_CURRENCY,
  PROGRESS_GOAL_SELECT, EXPENSE_AMOUNT, EXPENSE_REASON, EXPENSE_CURRENCY,
  ASSET_NAME, ASSET_AMOUNT, ASSET_CURRENCY, ASSET_TYPE,
- UPDATE_ASSET_SELECT, UPDATE_ASSET_AMOUNT) = range(20)
+ UPDATE_ASSET_SELECT, UPDATE_ASSET_AMOUNT, DELETE_ASSET_SELECT) = range(21)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -340,6 +340,20 @@ def update_asset_amount(asset_id: int, amount_change: float, operation: str) -> 
         return True
     except Exception as e:
         logger.error(f"Error updating asset: {e}")
+        return False
+    finally:
+        conn.close()
+
+def delete_asset_from_db(asset_id: int) -> bool:
+    """Delete an asset by ID"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Error deleting asset: {e}")
         return False
     finally:
         conn.close()
@@ -871,6 +885,13 @@ async def get_expense_currency(update: Update, context: ContextTypes.DEFAULT_TYP
     return EXPENSE_REASON
 
 async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Delete user's message first
+    if update.message:
+        try:
+            await update.message.delete()
+        except BadRequest as e:
+            logger.warning(f"Could not delete user's message: {e}")
+    
     reason = update.message.text
     amount = context.user_data['expense_amount']
     currency = context.user_data['expense_currency']
@@ -965,6 +986,13 @@ async def get_asset_currency(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ASSET_TYPE
 
 async def save_asset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # Delete user's message first
+    if update.message:
+        try:
+            await update.message.delete()
+        except BadRequest as e:
+            logger.warning(f"Could not delete user's message: {e}")
+    
     asset_type = update.message.text.lower()
     name = context.user_data['asset_name']
     amount = context.user_data['asset_amount']
@@ -1086,6 +1114,13 @@ async def select_asset_for_update(update: Update, context: ContextTypes.DEFAULT_
 
 async def process_asset_update(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
+        # Delete user's message first
+        if update.message:
+            try:
+                await update.message.delete()
+            except BadRequest as e:
+                logger.warning(f"Could not delete user's message: {e}")
+        
         amount_text = update.message.text.strip()
         asset_id = context.user_data.get('selected_asset_id')
 
@@ -1165,6 +1200,140 @@ async def process_asset_update(update: Update, context: ContextTypes.DEFAULT_TYP
         await send_and_delete(update, context, "❌ An error occurred. Please try again.")
         context.user_data.clear()
         return ConversationHandler.END
+
+@restricted
+async def delete_asset_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        if update.message:
+            await update.message.delete()
+    except BadRequest as e:
+        logger.warning(f"Could not delete user's message: {e}")
+
+    assets = get_user_assets(update.effective_user.id)
+    if not assets:
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="🏦 No assets found to delete. Use `add asset` to create one first.")
+        return ConversationHandler.END
+    
+    reply_markup = generate_asset_keyboard(assets, prefix="delete_asset", page=0)
+    await context.bot.send_message(chat_id=update.effective_chat.id, text="🗑️ Which asset do you want to delete?", reply_markup=reply_markup)
+    return DELETE_ASSET_SELECT
+
+async def navigate_delete_asset_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    try:
+        data_payload = query.data[4:]  # Removes "nav_"
+        prefix, page_str = data_payload.rsplit('_', 1)
+        page = int(page_str)
+    except (ValueError, IndexError) as e:
+        logger.error(f"Could not parse page number from callback_data: '{query.data}'. Error: {e}")
+        await query.edit_message_text(text="Error processing navigation. Please try again.")
+        return
+
+    assets = get_user_assets(query.from_user.id)
+    reply_markup = generate_asset_keyboard(assets, prefix=prefix, page=page)
+
+    try:
+        await query.edit_message_reply_markup(reply_markup)
+    except BadRequest as e:
+        if 'Message is not modified' not in str(e):
+             logger.warning(f"Failed to edit message reply markup for navigation: {e}")
+             await query.edit_message_text(text="Could not update the list. Please try again.")
+
+async def confirm_asset_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    
+    asset_id = int(query.data.split("_")[-1])
+    asset = get_asset_by_id(asset_id)
+    
+    if not asset:
+        await query.edit_message_text(text="❌ Error: Asset not found.")
+        return ConversationHandler.END
+
+    asset_id, name, amount, currency, asset_type, _, _ = asset
+    formatted_amount = fmt_currency_amount(amount, currency)
+    
+    type_emojis = {
+        'cash': '💵', 'crypto': '₿', 'stocks': '📈', 'bonds': '🏛️',
+        'real_estate': '🏠', 'commodities': '🥇', 'other': '💼'
+    }
+    emoji = type_emojis.get(asset_type.lower(), '💼')
+    
+    # Delete the asset
+    success = delete_asset_from_db(asset_id)
+    
+    if success:
+        await query.edit_message_text(
+            text=f"🗑️ **Asset Deleted Successfully!**\n\n"
+                 f"{emoji} **{name}** ({asset_type.title()})\n"
+                 f"Value: `{formatted_amount}`\n\n"
+                 f"💀 Gone forever. Hope you don't regret this."
+        )
+    else:
+        await query.edit_message_text(text="❌ Failed to delete asset. Please try again.")
+    
+    return ConversationHandler.END
+
+@restricted
+async def view_all_assets_detailed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show a detailed view of all assets with creation/update dates"""
+    assets = get_user_assets(update.effective_user.id)
+    
+    if not assets:
+        message = "🏦 **Complete Asset Portfolio**\n\n💰 Your vault is completely empty. Time to start building wealth!"
+    else:
+        # Group by asset type and currency for totals
+        by_type = {}
+        totals_by_currency = {}
+        
+        for asset_id, name, amount, currency, asset_type, created_at, updated_at in assets:
+            if asset_type not in by_type:
+                by_type[asset_type] = []
+            by_type[asset_type].append((name, amount, currency, created_at, updated_at))
+            totals_by_currency[currency] = totals_by_currency.get(currency, 0) + amount
+        
+        message = "🏦 **Complete Asset Portfolio**\n\n"
+        
+        # Total summary
+        message += "💎 **Portfolio Value:**\n"
+        for currency, total in sorted(totals_by_currency.items()):
+            message += f"  {fmt_currency_amount(total, currency)}\n"
+        
+        message += f"\n📊 **Assets by Category ({len(assets)} total):**\n"
+        
+        type_emojis = {
+            'cash': '💵', 'crypto': '₿', 'stocks': '📈', 'bonds': '🏛️',
+            'real_estate': '🏠', 'commodities': '🥇', 'other': '💼'
+        }
+        
+        for asset_type, type_assets in by_type.items():
+            emoji = type_emojis.get(asset_type.lower(), '💼')
+            message += f"\n{emoji} **{asset_type.title()}:**\n"
+            
+            for name, amount, currency, created_at, updated_at in type_assets:
+                formatted_amount = fmt_currency_amount(amount, currency)
+                
+                # Parse dates
+                created_date = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S').strftime('%b %d, %Y')
+                updated_date = datetime.strptime(updated_at, '%Y-%m-%d %H:%M:%S').strftime('%b %d, %Y')
+                
+                message += f"  • **{name}**: `{formatted_amount}`\n"
+                if created_at != updated_at:
+                    message += f"    📅 Created: {created_date} | 🔄 Updated: {updated_date}\n"
+                else:
+                    message += f"    📅 Created: {created_date}\n"
+        
+        # Add portfolio insights
+        total_value_usd = sum(total for currency, total in totals_by_currency.items() if currency == 'USD')
+        if total_value_usd > 0:
+            message += f"\n💡 **Insights:**\n"
+            message += f"  • USD Portfolio Value: {fmt_currency_amount(total_value_usd, 'USD')}\n"
+            message += f"  • Asset Categories: {len(by_type)}\n"
+            message += f"  • Most Common Type: {max(by_type.keys(), key=lambda k: len(by_type[k]))}\n"
+    
+    await send_and_delete(update, context, message, parse_mode='Markdown')
 
 def main() -> None:
     init_db()
@@ -1256,6 +1425,16 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    conv_handler_delete_asset = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^delete asset$', re.IGNORECASE)), delete_asset_start)],
+        states={
+            DELETE_ASSET_SELECT: [
+                CallbackQueryHandler(navigate_delete_asset_menu, pattern="^nav_delete_asset_"),
+                CallbackQueryHandler(confirm_asset_delete, pattern="^delete_asset_"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
     application.add_handler(conv_handler_new_goal)
     application.add_handler(conv_handler_new_debt)
@@ -1266,6 +1445,7 @@ def main() -> None:
     application.add_handler(conv_handler_add_expense)
     application.add_handler(conv_handler_add_asset)
     application.add_handler(conv_handler_update_asset)
+    application.add_handler(conv_handler_delete_asset)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
@@ -1275,13 +1455,14 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^expense compare$', re.IGNORECASE)), expense_compare))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view assets$', re.IGNORECASE)), view_assets))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^asset summary$', re.IGNORECASE)), asset_summary))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view all assets$', re.IGNORECASE)), view_all_assets_detailed))
     application.add_handler(CommandHandler("cancel", cancel))
     
     # Move unknown_command to the very end and make it more specific
     # Only catch messages that don't match any of our known patterns
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & 
-        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|view assets|asset summary)\s*$', re.IGNORECASE)), 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary)\s*$', re.IGNORECASE)), 
         unknown_command
     ))
 

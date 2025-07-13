@@ -46,7 +46,7 @@ MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command dec
                "💰 **Money Moves**\n  - `add`\n  - `progress`\n\n"
                "💸 **Expense Tracking**\n  - `add expense`\n  - `expense report`\n  - `expense compare`\n\n"
                "🏦 **Asset Tracking**\n  - `add asset`\n  - `update asset`\n  - `view assets`\n  - `delete asset`\n  - `view all assets`\n\n"
-               "🛠️ **Utilities**\n  - `set reminder`\n  - `export`\n  - `cancel`")
+               "🛠️ **Utilities**\n  - `set reminder`\n  - `export`\n  - `erase all`\n  - `cancel`")
 
 # --- States for ConversationHandler ---
 (GOAL_NAME, GOAL_AMOUNT, GOAL_CURRENCY,
@@ -240,6 +240,26 @@ def delete_goal_from_db(goal_id: int):
     cursor.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
     conn.commit()
     conn.close()
+
+def erase_all_data():
+    """Erase all data from the database - goals, debts, savings, expenses, and assets"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    try:
+        # Delete all data from all tables
+        cursor.execute("DELETE FROM savings")
+        cursor.execute("DELETE FROM expenses") 
+        cursor.execute("DELETE FROM assets")
+        cursor.execute("DELETE FROM goals")
+        conn.commit()
+        logger.info("All data erased from database")
+        return True
+    except Exception as e:
+        logger.error(f"Error erasing data: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
 
 # --- Expense & Asset Helper Functions ---
 def get_expenses_by_period(user_id: int, period: str) -> List[Tuple]:
@@ -509,6 +529,39 @@ def restricted(func):
 
 
 # --- Command & Conversation Handlers (Largely unchanged) ---
+
+@restricted
+async def erase_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Erase all data from the database"""
+    try:
+        # Delete user's message first
+        if update.message:
+            try:
+                await update.message.delete()
+            except BadRequest as e:
+                logger.warning(f"Could not delete user's message: {e}")
+        
+        success = erase_all_data()
+        
+        if success:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="💀 **NUCLEAR OPTION ACTIVATED** 💀\n\n"
+                     "All your financial data has been completely erased.\n"
+                     "Goals, debts, savings, expenses, assets - all gone.\n\n"
+                     "Hope you're ready to start fresh! 🔥"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="❌ **ERROR**: Failed to erase data. Something went wrong."
+            )
+    except Exception as e:
+        logger.error(f"Error in erase_all command: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ **ERROR**: An unexpected error occurred while trying to erase data."
+        )
 
 @restricted
 async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1456,13 +1509,14 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view assets$', re.IGNORECASE)), view_assets))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^asset summary$', re.IGNORECASE)), asset_summary))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view all assets$', re.IGNORECASE)), view_all_assets_detailed))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^erase all$', re.IGNORECASE)), erase_all))
     application.add_handler(CommandHandler("cancel", cancel))
     
     # Move unknown_command to the very end and make it more specific
     # Only catch messages that don't match any of our known patterns
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & 
-        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary)\s*$', re.IGNORECASE)), 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary|erase all)\s*$', re.IGNORECASE)), 
         unknown_command
     ))
 

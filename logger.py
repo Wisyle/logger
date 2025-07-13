@@ -41,21 +41,59 @@ STARTUP_MESSAGES = [
     "Powered up and ready to judge your spending habits.", "I have been summoned. Let's make some money moves.",
     "The financial overlord is online. Try to impress me.",
 ]
-MANUAL_TEXT = (f"**{random.choice(STARTUP_MESSAGES)}**\n\nHere's the command deck. Let's make some magic happen (or at least track it).\n\n"
-               "🎯 **Goals & Debts**\n  - `new goal`\n  - `new debt`\n  - `view all`\n  - `delete`\n\n"
-               "💰 **Money Moves**\n  - `add`\n  - `progress`\n\n"
-               "💸 **Expense Tracking**\n  - `add expense`\n  - `expense report`\n  - `expense compare`\n\n"
-               "🏦 **Asset Tracking**\n  - `add asset`\n  - `update asset`\n  - `view assets`\n  - `delete asset`\n  - `view all assets`\n\n"
-               "🛠️ **Utilities**\n  - `set reminder`\n  - `export`\n  - `erase all`\n  - `cancel`")
+MANUAL_TEXT = (f"<b>🤖 {random.choice(STARTUP_MESSAGES)}</b>\n\n"
+               f"<b>📋 COMMAND CENTER</b>\n"
+               f"<i>Your financial empire awaits...</i>\n\n"
+               
+               f"<b>🎯 Goals & Debts</b>\n"
+               f"<code>new goal</code> - Set a savings target\n"
+               f"<code>new debt</code> - Track debt to pay off\n"
+               f"<code>view all</code> - See all goals/debts\n"
+               f"<code>delete</code> - Remove goals/debts\n\n"
+               
+               f"<b>💰 Money Moves</b>\n"
+               f"<code>add</code> - Log savings/payments\n"
+               f"<code>progress</code> - Check goal progress\n\n"
+               
+               f"<b>💸 Smart Expense Tracking</b>\n"
+               f"<code>add expense</code> - Record spending\n"
+               f"<code>expense report</code> - View spending analysis\n"
+               f"<code>expense compare</code> - Compare periods\n"
+               f"<code>set budget</code> - Create spending limits\n"
+               f"<code>budget status</code> - Check budget health\n\n"
+               
+               f"<b>🏦 Asset Management</b>\n"
+               f"<code>add asset</code> - Track investments\n"
+               f"<code>update asset</code> - Modify values\n"
+               f"<code>view assets</code> - Portfolio overview\n"
+               f"<code>delete asset</code> - Remove assets\n"
+               f"<code>view all assets</code> - Detailed breakdown\n\n"
+               
+               f"<b>🔔 Smart Reminders</b>\n"
+               f"<code>add reminder</code> - Custom notifications\n"
+               f"<code>view reminders</code> - See all alarms\n"
+               f"<code>set reminder</code> - Daily savings nudge\n\n"
+               
+               f"<b>📊 Analytics & More</b>\n"
+               f"<code>financial dashboard</code> - Complete overview\n"
+               f"<code>trends</code> - Spending patterns\n"
+               f"<code>export</code> - Download your data\n\n"
+               
+               f"<b>⚠️ Nuclear Options</b>\n"
+               f"<code>erase all</code> - <i>Delete everything</i>\n"
+               f"<code>cancel</code> - Abort current action")
 
 # --- States for ConversationHandler ---
 (GOAL_NAME, GOAL_AMOUNT, GOAL_CURRENCY,
  ADD_SAVINGS_GOAL, ADD_SAVINGS_AMOUNT,
  DELETE_GOAL_CONFIRM, REMINDER_TIME,
  DEBT_NAME, DEBT_AMOUNT, DEBT_CURRENCY,
- PROGRESS_GOAL_SELECT, EXPENSE_AMOUNT, EXPENSE_REASON, EXPENSE_CURRENCY,
+ PROGRESS_GOAL_SELECT, EXPENSE_AMOUNT, EXPENSE_REASON, EXPENSE_CURRENCY, EXPENSE_CATEGORY,
  ASSET_NAME, ASSET_AMOUNT, ASSET_CURRENCY, ASSET_TYPE,
- UPDATE_ASSET_SELECT, UPDATE_ASSET_AMOUNT, DELETE_ASSET_SELECT) = range(21)
+ UPDATE_ASSET_SELECT, UPDATE_ASSET_AMOUNT, DELETE_ASSET_SELECT,
+ BUDGET_CATEGORY, BUDGET_AMOUNT, BUDGET_CURRENCY, BUDGET_PERIOD,
+ RECURRING_NAME, RECURRING_AMOUNT, RECURRING_CURRENCY, RECURRING_TYPE, RECURRING_CATEGORY, RECURRING_FREQUENCY,
+ REMINDER_TITLE, REMINDER_MESSAGE, REMINDER_FREQUENCY) = range(32)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -97,7 +135,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS expenses (
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
             amount REAL NOT NULL, currency TEXT NOT NULL,
-            reason TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            reason TEXT NOT NULL, category TEXT DEFAULT 'other',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     cursor.execute("""
@@ -106,6 +145,32 @@ def init_db():
             name TEXT NOT NULL, amount REAL NOT NULL, currency TEXT NOT NULL,
             asset_type TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS budgets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            category TEXT NOT NULL, amount REAL NOT NULL, currency TEXT NOT NULL,
+            period TEXT NOT NULL DEFAULT 'monthly', current_spent REAL DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS recurring_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            name TEXT NOT NULL, amount REAL NOT NULL, currency TEXT NOT NULL,
+            type TEXT NOT NULL, category TEXT DEFAULT 'other',
+            frequency TEXT NOT NULL, next_due DATE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            title TEXT NOT NULL, message TEXT, reminder_time TIME NOT NULL,
+            frequency TEXT NOT NULL DEFAULT 'daily', is_active BOOLEAN DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
@@ -242,14 +307,17 @@ def delete_goal_from_db(goal_id: int):
     conn.close()
 
 def erase_all_data():
-    """Erase all data from the database - goals, debts, savings, expenses, and assets"""
+    """Erase all data from the database - goals, debts, savings, expenses, assets, budgets, and reminders"""
     conn = db_connect()
     cursor = conn.cursor()
     try:
-        # Delete all data from all tables
+        # Delete all data from all tables (order matters due to foreign keys)
         cursor.execute("DELETE FROM savings")
         cursor.execute("DELETE FROM expenses") 
         cursor.execute("DELETE FROM assets")
+        cursor.execute("DELETE FROM budgets")
+        cursor.execute("DELETE FROM recurring_transactions")
+        cursor.execute("DELETE FROM reminders")
         cursor.execute("DELETE FROM goals")
         conn.commit()
         logger.info("All data erased from database")
@@ -304,9 +372,81 @@ def get_expense_totals_by_currency(user_id: int, period: str) -> Dict[str, float
     """Get total expenses grouped by currency for a period"""
     expenses = get_expenses_by_period(user_id, period)
     totals = {}
-    for amount, currency, _, _ in expenses:
+    for amount, currency, _, _, _ in expenses:  # Added category field
         totals[currency] = totals.get(currency, 0) + amount
     return totals
+
+# --- Budget Management Functions ---
+def get_user_budgets(user_id: int) -> List[Tuple]:
+    """Get all budgets for a user"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, category, amount, currency, period, current_spent, created_at, updated_at
+        FROM budgets 
+        WHERE user_id = ?
+        ORDER BY category
+    """, (user_id,))
+    budgets = cursor.fetchall()
+    conn.close()
+    return budgets
+
+def update_budget_spending(user_id: int, category: str, amount: float, currency: str):
+    """Update budget spending when expense is added"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            UPDATE budgets 
+            SET current_spent = current_spent + ?, updated_at = CURRENT_TIMESTAMP 
+            WHERE user_id = ? AND category = ? AND currency = ?
+        """, (amount, user_id, category, currency))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Error updating budget spending: {e}")
+        return False
+    finally:
+        conn.close()
+
+def check_budget_alerts(user_id: int, category: str, currency: str) -> Optional[str]:
+    """Check if budget limit is exceeded and return alert message"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT category, amount, current_spent, currency
+        FROM budgets 
+        WHERE user_id = ? AND category = ? AND currency = ?
+    """, (user_id, category, currency))
+    budget = cursor.fetchone()
+    conn.close()
+    
+    if not budget:
+        return None
+        
+    category, limit, spent, currency = budget
+    percentage = (spent / limit) * 100 if limit > 0 else 0
+    
+    if percentage >= 100:
+        return f"🚨 <b>BUDGET EXCEEDED!</b> 🚨\n<code>{category}</code> budget blown by {percentage-100:.1f}%"
+    elif percentage >= 80:
+        return f"⚠️ <b>Budget Warning!</b>\n<code>{category}</code> at {percentage:.1f}% ({fmt_currency_amount(limit-spent, currency)} left)"
+    
+    return None
+
+# --- Enhanced Expense Categories ---
+EXPENSE_CATEGORIES = {
+    'food': '🍽️ Food & Dining',
+    'transport': '🚗 Transportation', 
+    'shopping': '🛍️ Shopping',
+    'bills': '💡 Bills & Utilities',
+    'entertainment': '🎬 Entertainment',
+    'health': '🏥 Healthcare',
+    'education': '📚 Education',
+    'travel': '✈️ Travel',
+    'gifts': '🎁 Gifts',
+    'other': '📦 Other'
+}
 
 def get_user_assets(user_id: int) -> List[Tuple]:
     """Get all assets for a user"""
@@ -400,32 +540,48 @@ def fmt_currency_amount(amount: float, currency: str) -> str:
 def fmt_expense_report(expenses: List[Tuple], period: str) -> str:
     """Format expense report with nice formatting"""
     if not expenses:
-        return f"📊 **Expense Report ({period.title()})**\n\n💸 No expenses recorded for this period. Living frugally, I see!"
+        return f"<b>📊 Expense Report ({period.title()})</b>\n\n💸 <i>No expenses recorded for this period. Living frugally, I see!</i>"
     
-    # Group by currency
+    # Group by currency and category
     totals = {}
+    category_totals = {}
     expense_lines = []
     
-    for amount, currency, reason, created_at in expenses:
+    for amount, currency, reason, category, created_at in expenses:
         totals[currency] = totals.get(currency, 0) + amount
+        
+        if category not in category_totals:
+            category_totals[category] = {}
+        category_totals[category][currency] = category_totals[category].get(currency, 0) + amount
+        
         date_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
         formatted_date = date_obj.strftime('%b %d')
-        expense_lines.append(f"  • {fmt_currency_amount(amount, currency)} - {reason} ({formatted_date})")
+        category_emoji = EXPENSE_CATEGORIES.get(category, '📦 Other').split(' ')[0]
+        expense_lines.append(f"  • <code>{fmt_currency_amount(amount, currency)}</code> - {reason} {category_emoji} <i>({formatted_date})</i>")
     
-    # Build report
-    report = f"📊 **Expense Report ({period.title()})**\n\n"
+    # Build report with better formatting
+    report = f"<b>📊 Expense Report ({period.title()})</b>\n\n"
     
-    # Summary
-    report += "💰 **Summary:**\n"
+    # Summary by currency
+    report += "<b>💰 Total Spending:</b>\n"
     for currency, total in totals.items():
-        report += f"  {fmt_currency_amount(total, currency)}\n"
+        report += f"  <code>{fmt_currency_amount(total, currency)}</code>\n"
     
-    report += f"\n📝 **Transactions ({len(expenses)}):**\n"
+    # Summary by category
+    report += f"\n<b>🏷️ By Category:</b>\n"
+    for category, amounts in category_totals.items():
+        category_name = EXPENSE_CATEGORIES.get(category, f'📦 {category.title()}')
+        report += f"  {category_name}: "
+        for currency, amount in amounts.items():
+            report += f"<code>{fmt_currency_amount(amount, currency)}</code> "
+        report += "\n"
+    
+    report += f"\n<b>📝 Recent Transactions ({len(expenses)}):</b>\n"
     for line in expense_lines[:10]:  # Show max 10 recent transactions
         report += line + "\n"
     
     if len(expenses) > 10:
-        report += f"  ... and {len(expenses) - 10} more transactions\n"
+        report += f"  <i>... and {len(expenses) - 10} more transactions</i>\n"
     
     return report
 
@@ -631,11 +787,11 @@ async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 @restricted
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_and_delete(update, context, MANUAL_TEXT, parse_mode='Markdown')
+    await send_and_delete(update, context, MANUAL_TEXT, parse_mode='HTML')
 
 @restricted
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await send_and_delete(update, context, f"I don't know what '{update.message.text}' means. Stick to the script.\n\n" + MANUAL_TEXT, parse_mode='Markdown')
+    await send_and_delete(update, context, f"<b>❓ Unknown Command</b>\n\nI don't know what '<code>{update.message.text}</code>' means. Stick to the script.\n\n" + MANUAL_TEXT, parse_mode='HTML')
 
 @restricted
 async def new_goal_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -934,7 +1090,23 @@ async def get_expense_amount(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def get_expense_currency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['expense_currency'] = update.message.text.upper()
-    await send_and_delete(update, context, "What was this expense for? (e.g., Food, Transport, Shopping)")
+    
+    # Show category options with emojis
+    categories_text = "What category is this expense?\n\n"
+    for key, value in EXPENSE_CATEGORIES.items():
+        categories_text += f"<code>{key}</code> - {value}\n"
+    
+    await send_and_delete(update, context, categories_text, parse_mode='HTML')
+    return EXPENSE_CATEGORY
+
+async def get_expense_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    category = update.message.text.lower()
+    if category not in EXPENSE_CATEGORIES:
+        category = 'other'
+    
+    context.user_data['expense_category'] = category
+    category_name = EXPENSE_CATEGORIES[category]
+    await send_and_delete(update, context, f"Great! {category_name}\n\nWhat was this expense for? (describe the purchase)")
     return EXPENSE_REASON
 
 async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -948,25 +1120,46 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     reason = update.message.text
     amount = context.user_data['expense_amount']
     currency = context.user_data['expense_currency']
+    category = context.user_data.get('expense_category', 'other')
     
     try:
         conn = db_connect()
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO expenses (user_id, amount, currency, reason) VALUES (?, ?, ?, ?)",
-            (update.effective_user.id, amount, currency, reason)
+            "INSERT INTO expenses (user_id, amount, currency, reason, category) VALUES (?, ?, ?, ?, ?)",
+            (update.effective_user.id, amount, currency, reason, category)
         )
         conn.commit()
         conn.close()
         
+        # Update budget spending
+        update_budget_spending(update.effective_user.id, category, amount, currency)
+        
+        # Check for budget alerts
+        budget_alert = check_budget_alerts(update.effective_user.id, category, currency)
+        
         formatted_amount = fmt_currency_amount(amount, currency)
-        await send_and_delete(update, context, f"💸 Expense recorded: {formatted_amount} for {reason}")
+        category_name = EXPENSE_CATEGORIES.get(category, f'📦 {category.title()}')
+        
+        response = f"<b>💸 Expense Recorded!</b>\n\n"
+        response += f"<code>{formatted_amount}</code> - {reason}\n"
+        response += f"Category: {category_name}"
+        
+        await send_and_delete(update, context, response, parse_mode='HTML')
+        
+        # Send budget alert if needed
+        if budget_alert:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text=budget_alert,
+                parse_mode='HTML'
+            )
         
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error saving expense: {e}")
-        await send_and_delete(update, context, "Error saving expense. Try again.")
+        await send_and_delete(update, context, "❌ Error saving expense. Try again.")
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -984,8 +1177,8 @@ async def expense_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     week_report = fmt_expense_report(week_expenses, 'week')
     
     # Send reports
-    await send_and_delete(update, context, today_report, parse_mode='Markdown')
-    await send_and_delete(update, context, week_report, parse_mode='Markdown')
+    await send_and_delete(update, context, today_report, parse_mode='HTML')
+    await send_and_delete(update, context, week_report, parse_mode='HTML')
 
 @restricted
 async def expense_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1011,7 +1204,217 @@ async def expense_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         previous_week[currency] = previous_week.get(currency, 0) + amount
     
     comparison = fmt_expense_comparison(current_week, previous_week, 'week')
-    await send_and_delete(update, context, comparison, parse_mode='Markdown')
+    await send_and_delete(update, context, comparison, parse_mode='HTML')
+
+# --- Budget Management Handlers ---
+@restricted
+async def set_budget_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    categories_text = "<b>💰 Set Budget Limit</b>\n\nWhich category?\n\n"
+    for key, value in EXPENSE_CATEGORIES.items():
+        categories_text += f"<code>{key}</code> - {value}\n"
+    
+    await send_and_delete(update, context, categories_text, parse_mode='HTML')
+    return BUDGET_CATEGORY
+
+async def get_budget_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    category = update.message.text.lower()
+    if category not in EXPENSE_CATEGORIES:
+        category = 'other'
+    
+    context.user_data['budget_category'] = category
+    category_name = EXPENSE_CATEGORIES[category]
+    await send_and_delete(update, context, f"Setting budget for {category_name}\n\nHow much can you spend per month?")
+    return BUDGET_AMOUNT
+
+async def get_budget_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        context.user_data['budget_amount'] = float(update.message.text)
+        await send_and_delete(update, context, "Currency? (e.g., USD, EUR)")
+        return BUDGET_CURRENCY
+    except ValueError:
+        await send_and_delete(update, context, "That's not a number. Try again.")
+        return BUDGET_AMOUNT
+
+async def get_budget_currency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['budget_currency'] = update.message.text.upper()
+    await send_and_delete(update, context, "Budget period?\n\n<code>weekly</code> - Weekly limit\n<code>monthly</code> - Monthly limit", parse_mode='HTML')
+    return BUDGET_PERIOD
+
+async def save_budget(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message:
+        try:
+            await update.message.delete()
+        except BadRequest as e:
+            logger.warning(f"Could not delete user's message: {e}")
+    
+    period = update.message.text.lower()
+    if period not in ['weekly', 'monthly']:
+        period = 'monthly'
+    
+    category = context.user_data['budget_category']
+    amount = context.user_data['budget_amount']
+    currency = context.user_data['budget_currency']
+    
+    try:
+        conn = db_connect()
+        cursor = conn.cursor()
+        
+        # Check if budget already exists, update if it does
+        cursor.execute(
+            "SELECT id FROM budgets WHERE user_id = ? AND category = ? AND currency = ?",
+            (update.effective_user.id, category, currency)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            cursor.execute(
+                "UPDATE budgets SET amount = ?, period = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (amount, period, existing[0])
+            )
+            action = "updated"
+        else:
+            cursor.execute(
+                "INSERT INTO budgets (user_id, category, amount, currency, period) VALUES (?, ?, ?, ?, ?)",
+                (update.effective_user.id, category, amount, currency, period)
+            )
+            action = "created"
+        
+        conn.commit()
+        conn.close()
+        
+        formatted_amount = fmt_currency_amount(amount, currency)
+        category_name = EXPENSE_CATEGORIES.get(category, f'📦 {category.title()}')
+        
+        response = f"<b>💰 Budget {action.title()}!</b>\n\n"
+        response += f"{category_name}: <code>{formatted_amount}</code> per {period[:-2]}\n"
+        response += f"<i>I'll warn you when you hit 80% of this limit.</i>"
+        
+        await send_and_delete(update, context, response, parse_mode='HTML')
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error saving budget: {e}")
+        await send_and_delete(update, context, "❌ Error saving budget. Try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+@restricted
+async def budget_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    budgets = get_user_budgets(update.effective_user.id)
+    
+    if not budgets:
+        message = "<b>💰 Budget Status</b>\n\n<i>No budgets set yet. Use </i><code>set budget</code><i> to create spending limits.</i>"
+    else:
+        message = "<b>💰 Budget Dashboard</b>\n\n"
+        
+        for budget_id, category, limit, currency, period, spent, created_at, updated_at in budgets:
+            category_name = EXPENSE_CATEGORIES.get(category, f'📦 {category.title()}')
+            percentage = (spent / limit) * 100 if limit > 0 else 0
+            remaining = limit - spent
+            
+            # Status emoji based on spending
+            if percentage >= 100:
+                status = "🚨"
+            elif percentage >= 80:
+                status = "⚠️"
+            elif percentage >= 50:
+                status = "🟡"
+            else:
+                status = "🟢"
+            
+            message += f"{status} <b>{category_name}</b>\n"
+            message += f"  Budget: <code>{fmt_currency_amount(limit, currency)}</code> per {period[:-2]}\n"
+            message += f"  Spent: <code>{fmt_currency_amount(spent, currency)}</code> ({percentage:.1f}%)\n"
+            message += f"  Remaining: <code>{fmt_currency_amount(remaining, currency)}</code>\n\n"
+    
+    await send_and_delete(update, context, message, parse_mode='HTML')
+
+# --- Financial Dashboard ---
+@restricted
+async def financial_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    
+    # Get all data
+    goals = get_user_goals_and_debts(user_id)
+    assets = get_user_assets(user_id)
+    budgets = get_user_budgets(user_id)
+    today_expenses = get_expenses_by_period(user_id, 'today')
+    week_expenses = get_expenses_by_period(user_id, 'week')
+    
+    # Calculate totals
+    goal_progress = 0
+    debt_progress = 0
+    total_assets_usd = 0
+    today_spending = 0
+    week_spending = 0
+    
+    for goal in goals:
+        if goal[5] == 'goal':
+            goal_progress += (goal[3] / goal[2]) * 100 if goal[2] > 0 else 0
+        else:
+            debt_progress += (goal[3] / goal[2]) * 100 if goal[2] > 0 else 0
+    
+    for asset in assets:
+        if asset[3] == 'USD':  # Only count USD assets for simplicity
+            total_assets_usd += asset[2]
+    
+    for expense in today_expenses:
+        if expense[1] == 'USD':
+            today_spending += expense[0]
+    
+    for expense in week_expenses:
+        if expense[1] == 'USD':
+            week_spending += expense[0]
+    
+    # Build dashboard
+    dashboard = f"<b>📊 FINANCIAL DASHBOARD</b>\n"
+    dashboard += f"<i>Your complete financial overview</i>\n\n"
+    
+    # Quick stats
+    dashboard += f"<b>🎯 Goals & Debts ({len(goals)})</b>\n"
+    if goals:
+        avg_goal_progress = goal_progress / len([g for g in goals if g[5] == 'goal']) if any(g[5] == 'goal' for g in goals) else 0
+        avg_debt_progress = debt_progress / len([g for g in goals if g[5] == 'debt']) if any(g[5] == 'debt' for g in goals) else 0
+        dashboard += f"  Avg Goal Progress: <code>{avg_goal_progress:.1f}%</code>\n"
+        if any(g[5] == 'debt' for g in goals):
+            dashboard += f"  Avg Debt Paid: <code>{avg_debt_progress:.1f}%</code>\n"
+    else:
+        dashboard += f"  <i>No goals set yet</i>\n"
+    
+    dashboard += f"\n<b>🏦 Assets ({len(assets)})</b>\n"
+    if assets:
+        dashboard += f"  Portfolio Value: <code>${total_assets_usd:,.2f}</code>\n"
+    else:
+        dashboard += f"  <i>No assets tracked</i>\n"
+    
+    dashboard += f"\n<b>💸 Spending</b>\n"
+    dashboard += f"  Today: <code>${today_spending:,.2f}</code>\n"
+    dashboard += f"  This Week: <code>${week_spending:,.2f}</code>\n"
+    
+    # Budget alerts
+    budget_alerts = 0
+    for budget in budgets:
+        percentage = (budget[5] / budget[2]) * 100 if budget[2] > 0 else 0
+        if percentage >= 80:
+            budget_alerts += 1
+    
+    dashboard += f"\n<b>💰 Budgets ({len(budgets)})</b>\n"
+    if budget_alerts > 0:
+        dashboard += f"  ⚠️ <code>{budget_alerts}</code> budget(s) need attention\n"
+    elif budgets:
+        dashboard += f"  ✅ All budgets healthy\n"
+    else:
+        dashboard += f"  <i>No budgets set</i>\n"
+    
+    # Quick actions
+    dashboard += f"\n<b>⚡ Quick Actions</b>\n"
+    dashboard += f"<code>add expense</code> - Record spending\n"
+    dashboard += f"<code>add</code> - Save towards goal\n"
+    dashboard += f"<code>budget status</code> - Check limits\n"
+    dashboard += f"<code>view all</code> - See all goals\n"
+    
+    await send_and_delete(update, context, dashboard, parse_mode='HTML')
 
 # --- Asset Tracking Handlers ---
 @restricted
@@ -1453,7 +1856,18 @@ def main() -> None:
         states={
             EXPENSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_amount)],
             EXPENSE_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_currency)],
+            EXPENSE_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_category)],
             EXPENSE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_expense)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    conv_handler_set_budget = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^set budget$', re.IGNORECASE)), set_budget_start)],
+        states={
+            BUDGET_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_category)],
+            BUDGET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_amount)],
+            BUDGET_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_currency)],
+            BUDGET_PERIOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_budget)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -1496,6 +1910,7 @@ def main() -> None:
     application.add_handler(conv_handler_progress)
     application.add_handler(conv_handler_reminder)
     application.add_handler(conv_handler_add_expense)
+    application.add_handler(conv_handler_set_budget)
     application.add_handler(conv_handler_add_asset)
     application.add_handler(conv_handler_update_asset)
     application.add_handler(conv_handler_delete_asset)
@@ -1509,6 +1924,8 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view assets$', re.IGNORECASE)), view_assets))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^asset summary$', re.IGNORECASE)), asset_summary))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view all assets$', re.IGNORECASE)), view_all_assets_detailed))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^budget status$', re.IGNORECASE)), budget_status))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^financial dashboard$', re.IGNORECASE)), financial_dashboard))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^erase all$', re.IGNORECASE)), erase_all))
     application.add_handler(CommandHandler("cancel", cancel))
     
@@ -1516,7 +1933,7 @@ def main() -> None:
     # Only catch messages that don't match any of our known patterns
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & 
-        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary|erase all)\s*$', re.IGNORECASE)), 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary|set budget|budget status|financial dashboard|erase all)\s*$', re.IGNORECASE)), 
         unknown_command
     ))
 

@@ -2279,20 +2279,44 @@ def main() -> None:
     conv_handler_add_expense = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(re.compile(r'^add expense$', re.IGNORECASE)), add_expense_start)],
         states={
-            EXPENSE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_amount)],
-            EXPENSE_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_currency)],
-            EXPENSE_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_category)],
-            EXPENSE_REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_expense)],
+            EXPENSE_AMOUNT: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_amount)
+            ],
+            EXPENSE_CURRENCY: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_currency)
+            ],
+            EXPENSE_CATEGORY: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_expense_category)
+            ],
+            EXPENSE_REASON: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_expense)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     conv_handler_set_budget = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(re.compile(r'^set budget$', re.IGNORECASE)), set_budget_start)],
         states={
-            BUDGET_CATEGORY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_category)],
-            BUDGET_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_amount)],
-            BUDGET_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_currency)],
-            BUDGET_PERIOD: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_budget)],
+            BUDGET_CATEGORY: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_category)
+            ],
+            BUDGET_AMOUNT: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_amount)
+            ],
+            BUDGET_CURRENCY: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_budget_currency)
+            ],
+            BUDGET_PERIOD: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_budget)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -2330,12 +2354,30 @@ def main() -> None:
     conv_handler_new_payment = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(re.compile(r'^new payment$', re.IGNORECASE)), new_payment_start)],
         states={
-            PAYMENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_name)],
-            PAYMENT_RECIPIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_recipient)],
-            PAYMENT_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_target)],
-            PAYMENT_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_currency)],
-            PAYMENT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_amount)],
-            PAYMENT_FREQUENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_payment)],
+            PAYMENT_NAME: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_name)
+            ],
+            PAYMENT_RECIPIENT: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_recipient)
+            ],
+            PAYMENT_TARGET: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_target)
+            ],
+            PAYMENT_CURRENCY: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_currency)
+            ],
+            PAYMENT_AMOUNT: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_amount)
+            ],
+            PAYMENT_FREQUENCY: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, save_payment)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -2345,7 +2387,10 @@ def main() -> None:
             ADD_PAYMENT_SELECT: [
                 CallbackQueryHandler(select_payment_for_adding, pattern="^add_payment_"),
             ],
-            ADD_PAYMENT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_amount_and_save)],
+            ADD_PAYMENT_AMOUNT: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_amount_and_save)
+            ],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )

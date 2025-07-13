@@ -1502,17 +1502,17 @@ async def budget_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 # --- Payment Tracking Handlers ---
 @restricted
 async def new_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await send_and_delete(update, context, "<b>💳 New Payment Tracker</b>\n\nWhat should we call this payment? (e.g., 'Car Loan', 'House Payment', 'Friend Loan')")
+    await send_and_delete(update, context, "<b>💳 New Payment Tracker</b>\n\nWhat should we call this payment? (e.g., 'Car Loan', 'House Payment', 'Friend Loan')", parse_mode='HTML')
     return PAYMENT_NAME
 
 async def get_payment_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['payment_name'] = update.message.text
-    await send_and_delete(update, context, f"<b>Payment:</b> <i>{context.user_data['payment_name']}</i>\n\nWho are you paying? (recipient name)")
+    await send_and_delete(update, context, f"<b>Payment:</b> <i>{context.user_data['payment_name']}</i>\n\nWho are you paying? (recipient name)", parse_mode='HTML')
     return PAYMENT_RECIPIENT
 
 async def get_payment_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data['payment_recipient'] = update.message.text
-    await send_and_delete(update, context, f"<b>Paying:</b> <i>{context.user_data['payment_recipient']}</i>\n\nWhat's the total amount you need to pay? (initial capital/debt)")
+    await send_and_delete(update, context, f"<b>Paying:</b> <i>{context.user_data['payment_recipient']}</i>\n\nWhat's the total amount you need to pay? (initial capital/debt)", parse_mode='HTML')
     return PAYMENT_TARGET
 
 async def get_payment_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1528,7 +1528,7 @@ async def get_payment_currency(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data['payment_currency'] = update.message.text.upper()
     target = context.user_data['payment_target']
     currency = context.user_data['payment_currency']
-    await send_and_delete(update, context, f"<b>Total:</b> <code>{fmt_currency_amount(target, currency)}</code>\n\nHow much do you pay each time?")
+    await send_and_delete(update, context, f"<b>Total:</b> <code>{fmt_currency_amount(target, currency)}</code>\n\nHow much do you pay each time?", parse_mode='HTML')
     return PAYMENT_AMOUNT
 
 async def get_payment_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1579,12 +1579,12 @@ async def save_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         context.user_data.clear()
         return ConversationHandler.END
     except sqlite3.IntegrityError:
-        await send_and_delete(update, context, "❌ You already have a payment with that name. Choose a different name.")
+        await send_and_delete(update, context, "❌ You already have a payment with that name. Choose a different name.", parse_mode='HTML')
         context.user_data.clear()
         return ConversationHandler.END
     except Exception as e:
         logger.error(f"Error saving payment: {e}")
-        await send_and_delete(update, context, "❌ Error creating payment tracker. Try again.")
+        await send_and_delete(update, context, "❌ Error creating payment tracker. Try again.", parse_mode='HTML')
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -1676,7 +1676,7 @@ async def get_payment_amount_and_save(update: Update, context: ContextTypes.DEFA
         payment_id = context.user_data.get('selected_payment_id')
 
         if payment_id is None:
-            await send_and_delete(update, context, "❌ Lost track of which payment we were recording.")
+            await send_and_delete(update, context, "❌ Lost track of which payment we were recording.", parse_mode='HTML')
             context.user_data.clear()
             return ConversationHandler.END
 
@@ -1710,11 +1710,11 @@ async def get_payment_amount_and_save(update: Update, context: ContextTypes.DEFA
         return ConversationHandler.END
         
     except ValueError:
-        await send_and_delete(update, context, "❌ That's not a valid number. Enter the payment amount:")
+        await send_and_delete(update, context, "❌ That's not a valid number. Enter the payment amount:", parse_mode='HTML')
         return ADD_PAYMENT_AMOUNT
     except Exception as e:
         logger.error(f"Error saving payment: {e}")
-        await send_and_delete(update, context, "❌ Error recording payment. Try again.")
+        await send_and_delete(update, context, "❌ Error recording payment. Try again.", parse_mode='HTML')
         context.user_data.clear()
         return ConversationHandler.END
 

@@ -51,6 +51,13 @@ MANUAL_TEXT = (f"<b>🤖 {random.choice(STARTUP_MESSAGES)}</b>\n\n"
                f"<code>view all</code> - See all goals/debts\n"
                f"<code>delete</code> - Remove goals/debts\n\n"
                
+               f"<b>💳 Payment Tracking</b>\n"
+               f"<code>new payment</code> - Track ongoing payments\n"
+               f"<code>add payment</code> - Log payment made\n"
+               f"<code>view payments</code> - See all payments\n"
+               f"<code>payment progress</code> - Check payment status\n"
+               f"<code>delete payment</code> - Remove payment tracker\n\n"
+               
                f"<b>💰 Money Moves</b>\n"
                f"<code>add</code> - Log savings/payments\n"
                f"<code>progress</code> - Check goal progress\n\n"
@@ -93,7 +100,9 @@ MANUAL_TEXT = (f"<b>🤖 {random.choice(STARTUP_MESSAGES)}</b>\n\n"
  UPDATE_ASSET_SELECT, UPDATE_ASSET_AMOUNT, DELETE_ASSET_SELECT,
  BUDGET_CATEGORY, BUDGET_AMOUNT, BUDGET_CURRENCY, BUDGET_PERIOD,
  RECURRING_NAME, RECURRING_AMOUNT, RECURRING_CURRENCY, RECURRING_TYPE, RECURRING_CATEGORY, RECURRING_FREQUENCY,
- REMINDER_TITLE, REMINDER_MESSAGE, REMINDER_FREQUENCY) = range(35)
+ REMINDER_TITLE, REMINDER_MESSAGE, REMINDER_FREQUENCY,
+ PAYMENT_NAME, PAYMENT_RECIPIENT, PAYMENT_TARGET, PAYMENT_CURRENCY, PAYMENT_AMOUNT, PAYMENT_FREQUENCY,
+ ADD_PAYMENT_SELECT, ADD_PAYMENT_AMOUNT, DELETE_PAYMENT_SELECT, PAYMENT_PROGRESS_SELECT) = range(45)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -171,6 +180,22 @@ def init_db():
             title TEXT NOT NULL, message TEXT, reminder_time TIME NOT NULL,
             frequency TEXT NOT NULL DEFAULT 'daily', is_active BOOLEAN DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            name TEXT NOT NULL UNIQUE, target_amount REAL NOT NULL,
+            current_amount REAL DEFAULT 0, currency TEXT NOT NULL,
+            payment_amount REAL NOT NULL, payment_frequency TEXT NOT NULL DEFAULT 'monthly',
+            recipient TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS payment_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, payment_id INTEGER NOT NULL,
+            amount REAL NOT NULL, paid_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (payment_id) REFERENCES payments (id) ON DELETE CASCADE
         )
     """)
     conn.commit()
@@ -307,7 +332,7 @@ def delete_goal_from_db(goal_id: int):
     conn.close()
 
 def erase_all_data():
-    """Erase all data from the database - goals, debts, savings, expenses, assets, budgets, and reminders"""
+    """Erase all data from the database - goals, debts, savings, expenses, assets, budgets, reminders, and payments"""
     conn = db_connect()
     cursor = conn.cursor()
     try:
@@ -318,6 +343,8 @@ def erase_all_data():
         cursor.execute("DELETE FROM budgets")
         cursor.execute("DELETE FROM recurring_transactions")
         cursor.execute("DELETE FROM reminders")
+        cursor.execute("DELETE FROM payment_history")
+        cursor.execute("DELETE FROM payments")
         cursor.execute("DELETE FROM goals")
         conn.commit()
         logger.info("All data erased from database")
@@ -325,6 +352,65 @@ def erase_all_data():
     except Exception as e:
         logger.error(f"Error erasing data: {e}")
         conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+# --- Payment Management Functions ---
+def get_user_payments(user_id: int) -> List[Tuple]:
+    """Get all payments for a user"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, target_amount, current_amount, currency, payment_amount, 
+               payment_frequency, recipient, created_at
+        FROM payments 
+        WHERE user_id = ?
+        ORDER BY name
+    """, (user_id,))
+    payments = cursor.fetchall()
+    conn.close()
+    return payments
+
+def get_payment_by_id(payment_id: int) -> Optional[Tuple]:
+    """Get a specific payment by ID"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, name, target_amount, current_amount, currency, payment_amount, 
+               payment_frequency, recipient, created_at
+        FROM payments 
+        WHERE id = ?
+    """, (payment_id,))
+    payment = cursor.fetchone()
+    conn.close()
+    return payment
+
+def get_payment_history(payment_id: int, limit: int = 10) -> List[Tuple]:
+    """Get recent payment history for a specific payment"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT amount, paid_at 
+        FROM payment_history 
+        WHERE payment_id = ? 
+        ORDER BY paid_at DESC 
+        LIMIT ?
+    """, (payment_id, limit))
+    history = cursor.fetchall()
+    conn.close()
+    return history
+
+def delete_payment_from_db(payment_id: int):
+    """Delete a payment and its history"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM payments WHERE id = ?", (payment_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting payment: {e}")
         return False
     finally:
         conn.close()
@@ -447,6 +533,89 @@ EXPENSE_CATEGORIES = {
     'gifts': '🎁 Gifts',
     'other': '📦 Other'
 }
+
+# --- Payment Formatting Functions ---
+def fmt_payment_list(payments: List[Tuple]) -> str:
+    """Format payment list with progress tracking"""
+    if not payments:
+        return "<b>💳 Payment Tracker</b>\n\n<i>No payments being tracked yet. Use </i><code>new payment</code><i> to start.</i>"
+    
+    message = "<b>💳 Payment Tracker</b>\n<i>Ongoing payment obligations</i>\n\n"
+    
+    for payment in payments:
+        payment_id, name, target, current, currency, payment_amt, frequency, recipient, created = payment
+        progress_percent = (current / target) * 100 if target > 0 else 0
+        remaining = max(0, target - current)  # Don't show negative remaining
+        
+        # Payment status
+        if current >= target:
+            status = "✅ Target Reached"
+            progress_bar = fmt_progress_bar(100, length=8)
+        else:
+            status = f"{progress_percent:.1f}% Complete"
+            progress_bar = fmt_progress_bar(progress_percent, length=8)
+        
+        payments_made = int(current / payment_amt) if payment_amt > 0 else 0
+        
+        message += f"💳 <b>{name.upper()}</b>\n"
+        message += f"   To: <i>{recipient}</i>\n"
+        message += f"   <code>{progress_bar} {status}</code>\n"
+        message += f"   • Paid: <code>{fmt_currency_amount(current, currency)}</code> of <code>{fmt_currency_amount(target, currency)}</code>\n"
+        
+        if remaining > 0:
+            message += f"   • Remaining: <code>{fmt_currency_amount(remaining, currency)}</code>\n"
+        else:
+            message += f"   • <b>Target exceeded by:</b> <code>{fmt_currency_amount(current - target, currency)}</code>\n"
+        
+        message += f"   • Payments: <code>{payments_made}</code> × <code>{fmt_currency_amount(payment_amt, currency)}</code> {frequency}\n\n"
+    
+    return message
+
+def fmt_payment_progress(payment: Tuple, recent_payments: List[Tuple]) -> str:
+    """Format detailed payment progress"""
+    payment_id, name, target, current, currency, payment_amt, frequency, recipient, created = payment
+    progress_percent = (current / target) * 100 if target > 0 else 0
+    
+    header = f"💳 <b>Payment Progress: {name.upper()}</b>\n"
+    header += f"<i>Paying {recipient}</i>\n\n"
+    
+    # Progress visualization
+    if current >= target:
+        animated_bar = fmt_progress_bar(100, length=15)
+        status_line = f"<code>{animated_bar} ✅ TARGET REACHED!</code>\n\n"
+    else:
+        animated_bar = fmt_progress_bar(progress_percent, length=15)
+        status_line = f"<code>{animated_bar} {progress_percent:.1f}%</code>\n\n"
+    
+    # Payment details
+    payments_made = int(current / payment_amt) if payment_amt > 0 else 0
+    remaining = max(0, target - current)
+    
+    details = f"<b>📊 Payment Summary:</b>\n"
+    details += f"  • Target Amount: <code>{fmt_currency_amount(target, currency)}</code>\n"
+    details += f"  • Total Paid: <code>{fmt_currency_amount(current, currency)}</code>\n"
+    
+    if remaining > 0:
+        details += f"  • Remaining: <code>{fmt_currency_amount(remaining, currency)}</code>\n"
+        payments_left = remaining / payment_amt if payment_amt > 0 else 0
+        details += f"  • Est. Payments Left: <code>{payments_left:.0f}</code>\n"
+    else:
+        details += f"  • <b>Overpaid by:</b> <code>{fmt_currency_amount(current - target, currency)}</code>\n"
+    
+    details += f"  • Payment Size: <code>{fmt_currency_amount(payment_amt, currency)}</code> {frequency}\n"
+    details += f"  • Payments Made: <code>{payments_made}</code>\n\n"
+    
+    # Recent payments
+    history = "<b>📝 Recent Payments:</b>\n"
+    if not recent_payments:
+        history += "<i>No payments recorded yet.</i>"
+    else:
+        for amount, date_str in recent_payments[:5]:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+            formatted_date = date_obj.strftime('%b %d, %Y')
+            history += f"  • <code>{fmt_currency_amount(amount, currency)}</code> on {formatted_date}\n"
+    
+    return header + status_line + details + history
 
 def get_user_assets(user_id: int) -> List[Tuple]:
     """Get all assets for a user"""
@@ -1330,6 +1499,262 @@ async def budget_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     await send_and_delete(update, context, message, parse_mode='HTML')
 
+# --- Payment Tracking Handlers ---
+@restricted
+async def new_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send_and_delete(update, context, "<b>💳 New Payment Tracker</b>\n\nWhat should we call this payment? (e.g., 'Car Loan', 'House Payment', 'Friend Loan')")
+    return PAYMENT_NAME
+
+async def get_payment_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['payment_name'] = update.message.text
+    await send_and_delete(update, context, f"<b>Payment:</b> <i>{context.user_data['payment_name']}</i>\n\nWho are you paying? (recipient name)")
+    return PAYMENT_RECIPIENT
+
+async def get_payment_recipient(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['payment_recipient'] = update.message.text
+    await send_and_delete(update, context, f"<b>Paying:</b> <i>{context.user_data['payment_recipient']}</i>\n\nWhat's the total amount you need to pay? (initial capital/debt)")
+    return PAYMENT_TARGET
+
+async def get_payment_target(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        context.user_data['payment_target'] = float(update.message.text)
+        await send_and_delete(update, context, "Currency? (e.g., USD, EUR)")
+        return PAYMENT_CURRENCY
+    except ValueError:
+        await send_and_delete(update, context, "That's not a number. Enter the total amount to pay:")
+        return PAYMENT_TARGET
+
+async def get_payment_currency(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['payment_currency'] = update.message.text.upper()
+    target = context.user_data['payment_target']
+    currency = context.user_data['payment_currency']
+    await send_and_delete(update, context, f"<b>Total:</b> <code>{fmt_currency_amount(target, currency)}</code>\n\nHow much do you pay each time?")
+    return PAYMENT_AMOUNT
+
+async def get_payment_amount(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        context.user_data['payment_amount'] = float(update.message.text)
+        await send_and_delete(update, context, "How often do you make this payment?\n\n<code>weekly</code> - Every week\n<code>monthly</code> - Every month\n<code>quarterly</code> - Every 3 months\n<code>yearly</code> - Every year", parse_mode='HTML')
+        return PAYMENT_FREQUENCY
+    except ValueError:
+        await send_and_delete(update, context, "That's not a number. Enter the payment amount:")
+        return PAYMENT_AMOUNT
+
+async def save_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if update.message:
+        try:
+            await update.message.delete()
+        except BadRequest as e:
+            logger.warning(f"Could not delete user's message: {e}")
+    
+    frequency = update.message.text.lower()
+    if frequency not in ['weekly', 'monthly', 'quarterly', 'yearly']:
+        frequency = 'monthly'
+    
+    name = context.user_data['payment_name']
+    recipient = context.user_data['payment_recipient']
+    target = context.user_data['payment_target']
+    currency = context.user_data['payment_currency']
+    amount = context.user_data['payment_amount']
+    
+    try:
+        conn = db_connect()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO payments (user_id, name, target_amount, currency, payment_amount, payment_frequency, recipient) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (update.effective_user.id, name, target, currency, amount, frequency, recipient))
+        conn.commit()
+        conn.close()
+        
+        response = f"<b>💳 Payment Tracker Created!</b>\n\n"
+        response += f"<b>Payment:</b> {name}\n"
+        response += f"<b>To:</b> {recipient}\n"
+        response += f"<b>Total:</b> <code>{fmt_currency_amount(target, currency)}</code>\n"
+        response += f"<b>Payment:</b> <code>{fmt_currency_amount(amount, currency)}</code> {frequency}\n\n"
+        response += f"<i>Use </i><code>add payment</code><i> to log payments made!</i>"
+        
+        await send_and_delete(update, context, response, parse_mode='HTML')
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+    except sqlite3.IntegrityError:
+        await send_and_delete(update, context, "❌ You already have a payment with that name. Choose a different name.")
+        context.user_data.clear()
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error saving payment: {e}")
+        await send_and_delete(update, context, "❌ Error creating payment tracker. Try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+@restricted
+async def view_payments(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    payments = get_user_payments(update.effective_user.id)
+    message = fmt_payment_list(payments)
+    await send_and_delete(update, context, message, parse_mode='HTML')
+
+@restricted
+async def add_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await payment_list_start(update, context, prefix="add_payment", state=ADD_PAYMENT_SELECT)
+
+async def payment_list_start(update: Update, context: ContextTypes.DEFAULT_TYPE, prefix: str, state: int) -> int:
+    chat_id = update.effective_chat.id
+
+    try:
+        if update.message:
+            await update.message.delete()
+    except BadRequest as e:
+        logger.warning(f"Could not delete user's message: {e}")
+
+    payments = get_user_payments(update.effective_user.id)
+    if not payments:
+        await context.bot.send_message(chat_id=chat_id, text="<b>💳 No Payments Found</b>\n\n<i>Create a payment tracker first with </i><code>new payment</code>", parse_mode='HTML')
+        return ConversationHandler.END
+    
+    reply_markup = generate_payment_keyboard(payments, prefix=prefix, page=0)
+    await context.bot.send_message(chat_id=chat_id, text="<b>💳 Select Payment:</b>", reply_markup=reply_markup, parse_mode='HTML')
+    return state
+
+def generate_payment_keyboard(payments: List[Tuple], prefix: str, page: int = 0) -> InlineKeyboardMarkup:
+    """Creates a paginated inline keyboard for payments."""
+    keyboard = []
+    start_index = page * ITEMS_PER_PAGE
+    end_index = start_index + ITEMS_PER_PAGE
+
+    for payment in payments[start_index:end_index]:
+        payment_id, name, target, current, currency, payment_amt, frequency, recipient, created = payment
+        progress = (current / target) * 100 if target > 0 else 0
+        
+        if current >= target:
+            emoji = "✅"
+        elif progress >= 50:
+            emoji = "🟡"
+        else:
+            emoji = "💳"
+            
+        button = InlineKeyboardButton(f"{emoji} {name} → {recipient}", callback_data=f"{prefix}_{payment_id}")
+        keyboard.append([button])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"nav_{prefix}_{page - 1}"))
+    if end_index < len(payments):
+        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"nav_{prefix}_{page + 1}"))
+
+    if nav_row:
+        keyboard.append(nav_row)
+
+    return InlineKeyboardMarkup(keyboard)
+
+async def select_payment_for_adding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    payment_id = int(query.data.split("_")[-1])
+    context.user_data['selected_payment_id'] = payment_id
+    payment = get_payment_by_id(payment_id)
+    if not payment:
+        await query.edit_message_text(text="❌ Error: Payment not found.", parse_mode='HTML')
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    _, name, target, current, currency, payment_amt, frequency, recipient, _ = payment
+    
+    await query.edit_message_text(
+        text=f"<b>💳 Recording Payment</b>\n\n"
+             f"<b>Payment:</b> {name}\n"
+             f"<b>To:</b> {recipient}\n"
+             f"<b>Suggested:</b> <code>{fmt_currency_amount(payment_amt, currency)}</code>\n\n"
+             f"How much did you pay?",
+        parse_mode='HTML'
+    )
+    return ADD_PAYMENT_AMOUNT
+
+async def get_payment_amount_and_save(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        amount = float(update.message.text)
+        payment_id = context.user_data.get('selected_payment_id')
+
+        if payment_id is None:
+            await send_and_delete(update, context, "❌ Lost track of which payment we were recording.")
+            context.user_data.clear()
+            return ConversationHandler.END
+
+        conn = db_connect()
+        cursor = conn.cursor()
+        
+        # Add to payment history
+        cursor.execute("INSERT INTO payment_history (payment_id, amount) VALUES (?, ?)", (payment_id, amount))
+        
+        # Update current amount in payments table
+        cursor.execute("UPDATE payments SET current_amount = current_amount + ? WHERE id = ?", (amount, payment_id))
+        
+        conn.commit()
+        
+        payment = get_payment_by_id(payment_id)
+        if payment:
+            _, name, target, current, currency, payment_amt, frequency, recipient, _ = payment
+            progress = (current / target) * 100 if target > 0 else 0
+            
+            response = f"<b>✅ Payment Recorded!</b>\n\n"
+            response += f"<code>{fmt_currency_amount(amount, currency)}</code> paid to {recipient}\n\n"
+            response += f"<b>Progress:</b> <code>{fmt_currency_amount(current, currency)}</code> / <code>{fmt_currency_amount(target, currency)}</code> ({progress:.1f}%)\n"
+            
+            if current >= target:
+                response += f"\n🎉 <b>TARGET REACHED!</b> Payment continues tracking."
+            
+            await send_and_delete(update, context, response, parse_mode='HTML')
+        
+        conn.close()
+        context.user_data.clear()
+        return ConversationHandler.END
+        
+    except ValueError:
+        await send_and_delete(update, context, "❌ That's not a valid number. Enter the payment amount:")
+        return ADD_PAYMENT_AMOUNT
+    except Exception as e:
+        logger.error(f"Error saving payment: {e}")
+        await send_and_delete(update, context, "❌ Error recording payment. Try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+@restricted
+async def payment_progress_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await payment_list_start(update, context, prefix="payment_progress", state=PAYMENT_PROGRESS_SELECT)
+
+async def show_payment_progress(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    payment_id = int(query.data.split("_")[-1])
+    payment = get_payment_by_id(payment_id)
+    if not payment:
+        await query.edit_message_text(text="❌ Error: Payment not found.")
+        return ConversationHandler.END
+    
+    recent_payments = get_payment_history(payment_id)
+    progress_message = fmt_payment_progress(payment, recent_payments)
+    await query.edit_message_text(text=progress_message, parse_mode='HTML')
+    return ConversationHandler.END
+
+@restricted
+async def delete_payment_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    return await payment_list_start(update, context, prefix="delete_payment", state=DELETE_PAYMENT_SELECT)
+
+async def confirm_payment_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    await query.answer()
+    payment_id = int(query.data.split("_")[-1])
+    payment = get_payment_by_id(payment_id)
+    if payment:
+        success = delete_payment_from_db(payment_id)
+        if success:
+            await query.edit_message_text(text=f"<b>🗑️ Payment Deleted</b>\n\n<i>'{payment[1]}' tracking removed.</i>", parse_mode='HTML')
+        else:
+            await query.edit_message_text(text="❌ Error deleting payment.")
+    else:
+        await query.edit_message_text(text="❌ Payment not found.")
+    return ConversationHandler.END
+
 # --- Financial Dashboard ---
 @restricted
 async def financial_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1902,6 +2327,46 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    conv_handler_new_payment = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^new payment$', re.IGNORECASE)), new_payment_start)],
+        states={
+            PAYMENT_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_name)],
+            PAYMENT_RECIPIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_recipient)],
+            PAYMENT_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_target)],
+            PAYMENT_CURRENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_currency)],
+            PAYMENT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_amount)],
+            PAYMENT_FREQUENCY: [MessageHandler(filters.TEXT & ~filters.COMMAND, save_payment)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    conv_handler_add_payment = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^add payment$', re.IGNORECASE)), add_payment_start)],
+        states={
+            ADD_PAYMENT_SELECT: [
+                CallbackQueryHandler(select_payment_for_adding, pattern="^add_payment_"),
+            ],
+            ADD_PAYMENT_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_payment_amount_and_save)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    conv_handler_payment_progress = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^payment progress$', re.IGNORECASE)), payment_progress_start)],
+        states={
+            PAYMENT_PROGRESS_SELECT: [
+                CallbackQueryHandler(show_payment_progress, pattern="^payment_progress_"),
+            ]
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    conv_handler_delete_payment = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^delete payment$', re.IGNORECASE)), delete_payment_start)],
+        states={
+            DELETE_PAYMENT_SELECT: [
+                CallbackQueryHandler(confirm_payment_delete, pattern="^delete_payment_"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
     application.add_handler(conv_handler_new_goal)
     application.add_handler(conv_handler_new_debt)
@@ -1914,6 +2379,10 @@ def main() -> None:
     application.add_handler(conv_handler_add_asset)
     application.add_handler(conv_handler_update_asset)
     application.add_handler(conv_handler_delete_asset)
+    application.add_handler(conv_handler_new_payment)
+    application.add_handler(conv_handler_add_payment)
+    application.add_handler(conv_handler_payment_progress)
+    application.add_handler(conv_handler_delete_payment)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
@@ -1926,6 +2395,7 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view all assets$', re.IGNORECASE)), view_all_assets_detailed))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^budget status$', re.IGNORECASE)), budget_status))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^financial dashboard$', re.IGNORECASE)), financial_dashboard))
+    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view payments$', re.IGNORECASE)), view_payments))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^erase all$', re.IGNORECASE)), erase_all))
     application.add_handler(CommandHandler("cancel", cancel))
     
@@ -1933,7 +2403,7 @@ def main() -> None:
     # Only catch messages that don't match any of our known patterns
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & 
-        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary|set budget|budget status|financial dashboard|erase all)\s*$', re.IGNORECASE)), 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary|set budget|budget status|financial dashboard|new payment|add payment|view payments|payment progress|delete payment|erase all)\s*$', re.IGNORECASE)), 
         unknown_command
     ))
 

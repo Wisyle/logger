@@ -102,7 +102,8 @@ MANUAL_TEXT = (f"<b>🤖 {random.choice(STARTUP_MESSAGES)}</b>\n\n"
  RECURRING_NAME, RECURRING_AMOUNT, RECURRING_CURRENCY, RECURRING_TYPE, RECURRING_CATEGORY, RECURRING_FREQUENCY,
  REMINDER_TITLE, REMINDER_MESSAGE, REMINDER_FREQUENCY,
  PAYMENT_NAME, PAYMENT_RECIPIENT, PAYMENT_TARGET, PAYMENT_CURRENCY, PAYMENT_AMOUNT, PAYMENT_FREQUENCY,
- ADD_PAYMENT_SELECT, ADD_PAYMENT_AMOUNT, DELETE_PAYMENT_SELECT, PAYMENT_PROGRESS_SELECT) = range(45)
+ ADD_PAYMENT_SELECT, ADD_PAYMENT_AMOUNT, DELETE_PAYMENT_SELECT, PAYMENT_PROGRESS_SELECT,
+ ERASE_CAPTCHA, ERASE_FINAL_CONFIRM) = range(47)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -423,28 +424,28 @@ def get_expenses_by_period(user_id: int, period: str) -> List[Tuple]:
     
     if period == 'today':
         cursor.execute("""
-            SELECT amount, currency, reason, created_at 
+            SELECT amount, currency, reason, category, created_at 
             FROM expenses 
             WHERE user_id = ? AND DATE(created_at) = DATE('now')
             ORDER BY created_at DESC
         """, (user_id,))
     elif period == 'week':
         cursor.execute("""
-            SELECT amount, currency, reason, created_at 
+            SELECT amount, currency, reason, category, created_at 
             FROM expenses 
             WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-7 days')
             ORDER BY created_at DESC
         """, (user_id,))
     elif period == 'month':
         cursor.execute("""
-            SELECT amount, currency, reason, created_at 
+            SELECT amount, currency, reason, category, created_at 
             FROM expenses 
             WHERE user_id = ? AND DATE(created_at) >= DATE('now', '-30 days')
             ORDER BY created_at DESC
         """, (user_id,))
     else:  # all
         cursor.execute("""
-            SELECT amount, currency, reason, created_at 
+            SELECT amount, currency, reason, category, created_at 
             FROM expenses 
             WHERE user_id = ?
             ORDER BY created_at DESC
@@ -852,12 +853,70 @@ def restricted(func):
         return await func(update, context, *args, **kwargs)
     return wrapped
 
+def generate_pdf_report(records, summary_data, pdf_path):
+    """Generate PDF report from records and summary data"""
+    try:
+        doc = SimpleDocTemplate(pdf_path, pagesize=letter)
+        elements = []
+        styles = getSampleStyleSheet()
+        
+        # Title
+        title = Paragraph("Financial Report", styles['Title'])
+        elements.append(title)
+        elements.append(Spacer(1, 12))
+        
+        # Summary table
+        if summary_data:
+            summary_table = Table(summary_data)
+            summary_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 14),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(summary_table)
+            elements.append(Spacer(1, 12))
+        
+        # Transactions table
+        if records:
+            # Create table data with headers
+            table_data = [["Name", "Type", "Target", "Currency", "Amount", "Date"]]
+            for record in records:
+                name, type_val, target, currency, amount, date_str = record
+                formatted_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M')
+                table_data.append([name, type_val, f"{target:,.2f}", currency, f"{amount:,.2f}", formatted_date])
+            
+            # Create and style table
+            table = Table(table_data)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 12),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(table)
+        
+        # Build PDF
+        doc.build(elements)
+        return True
+    except Exception as e:
+        logger.error(f"Error generating PDF: {e}")
+        return False
+
 
 # --- Command & Conversation Handlers (Largely unchanged) ---
 
 @restricted
-async def erase_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Erase all data from the database"""
+async def erase_all_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Start the erase all process with captcha"""
     try:
         # Delete user's message first
         if update.message:
@@ -866,27 +925,117 @@ async def erase_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             except BadRequest as e:
                 logger.warning(f"Could not delete user's message: {e}")
         
-        success = erase_all_data()
+        # Generate a simple captcha (random 4-digit number)
+        captcha = random.randint(1000, 9999)
+        context.user_data['captcha'] = captcha
         
-        if success:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="💀 **NUCLEAR OPTION ACTIVATED** 💀\n\n"
-                     "All your financial data has been completely erased.\n"
-                     "Goals, debts, savings, expenses, assets - all gone.\n\n"
-                     "Hope you're ready to start fresh! 🔥"
-            )
-        else:
-            await context.bot.send_message(
-                chat_id=update.effective_chat.id,
-                text="❌ **ERROR**: Failed to erase data. Something went wrong."
-            )
-    except Exception as e:
-        logger.error(f"Error in erase_all command: {e}")
+        warning_message = (
+            "⚠️ <b>DANGER ZONE</b> ⚠️\n\n"
+            "You are about to <b>PERMANENTLY DELETE</b> ALL your data:\n"
+            "• All goals and debts\n"
+            "• All savings history\n"
+            "• All expenses\n"
+            "• All assets\n"
+            "• All budgets\n"
+            "• All reminders\n"
+            "• All payments\n\n"
+            "<b>This action CANNOT be undone!</b>\n\n"
+            f"If you're absolutely sure, type this number: <code>{captcha}</code>\n\n"
+            "Or type 'cancel' to abort."
+        )
+        
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="❌ **ERROR**: An unexpected error occurred while trying to erase data."
+            text=warning_message,
+            parse_mode='HTML'
         )
+        
+        return ERASE_CAPTCHA
+        
+    except Exception as e:
+        logger.error(f"Error in erase_all_start command: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ **ERROR**: An unexpected error occurred."
+        )
+        return ConversationHandler.END
+
+async def verify_captcha(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Verify the captcha and show final confirmation"""
+    try:
+        user_input = update.message.text.strip()
+        expected_captcha = str(context.user_data.get('captcha', ''))
+        
+        if user_input != expected_captcha:
+            await send_and_delete(update, context, 
+                "❌ Wrong number. If you really want to delete everything, start over with 'erase all'.")
+            context.user_data.clear()
+            return ConversationHandler.END
+        
+        # Captcha verified, show final confirmation with inline buttons
+        keyboard = [
+            [
+                InlineKeyboardButton("🗑️ YES, DELETE EVERYTHING", callback_data="confirm_erase_yes"),
+                InlineKeyboardButton("❌ Cancel", callback_data="confirm_erase_no")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        final_message = (
+            "💀 <b>FINAL CONFIRMATION</b> 💀\n\n"
+            "Captcha verified. You are ONE CLICK away from deleting ALL your financial data.\n\n"
+            "<b>This is your LAST CHANCE to back out!</b>\n\n"
+            "Click 'YES, DELETE EVERYTHING' to proceed or 'Cancel' to abort."
+        )
+        
+        await send_and_delete(update, context, final_message, parse_mode='HTML', reply_markup=reply_markup)
+        return ERASE_FINAL_CONFIRM
+        
+    except Exception as e:
+        logger.error(f"Error in verify_captcha: {e}")
+        await send_and_delete(update, context, "❌ Error processing captcha. Please try again.")
+        context.user_data.clear()
+        return ConversationHandler.END
+
+async def handle_final_erase_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle the final confirmation buttons"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        if query.data == "confirm_erase_yes":
+            # User confirmed, proceed with deletion
+            success = erase_all_data()
+            
+            if success:
+                await query.edit_message_text(
+                    text="💀 **NUCLEAR OPTION ACTIVATED** 💀\n\n"
+                         "All your financial data has been completely erased.\n"
+                         "Goals, debts, savings, expenses, assets - all gone.\n\n"
+                         "Hope you're ready to start fresh! 🔥",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    text="❌ **ERROR**: Failed to erase data. Something went wrong."
+                )
+        else:
+            # User cancelled
+            await query.edit_message_text(
+                text="✅ **Phew!** Operation cancelled. Your data is safe.\n\n"
+                     "Smart choice. Your financial empire lives to see another day! 💰"
+            )
+        
+        context.user_data.clear()
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logger.error(f"Error in handle_final_erase_confirmation: {e}")
+        await query.edit_message_text(
+            text="❌ **ERROR**: An unexpected error occurred."
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
 
 @restricted
 async def export_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1214,19 +1363,34 @@ async def reminder_callback(context: ContextTypes.DEFAULT_TYPE) -> None:
     await context.bot.send_message(chat_id=context.job.chat_id, text="🔔 Reminder: Your goals won't meet themselves. Did you save today?")
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Determine the appropriate method to respond based on the update type
-    if update.callback_query:
-        await update.callback_query.answer() # Acknowledge the callback query
-        await update.callback_query.edit_message_text(text="Fine, whatever. Mission aborted.")
-    elif update.message:
-        # Delete user's message and send a response that also gets deleted
-        await send_and_delete(update, context, "Fine, whatever. Mission aborted.")
-    else:
-        # Fallback if neither message nor callback_query exists (unlikely but good for robustness)
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="Fine, whatever. Mission aborted.")
+    """Cancel any ongoing conversation and clean up"""
+    try:
+        # Stop any running jobs for this user
+        chat_id = update.effective_chat.id
+        for job in context.job_queue.get_jobs_by_name(str(chat_id)):
+            job.schedule_removal()
+        
+        # Clear any user data
+        context.user_data.clear()
+        
+        # Determine the appropriate method to respond based on the update type
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.edit_message_text(text="✅ Operation cancelled. All processes stopped.")
+        elif update.message:
+            # Delete user's message and send a response that also gets deleted
+            await send_and_delete(update, context, "✅ Operation cancelled. All processes stopped.")
+        else:
+            # Fallback if neither message nor callback_query exists
+            await context.bot.send_message(chat_id=chat_id, text="✅ Operation cancelled. All processes stopped.")
 
-    context.user_data.clear()
-    return ConversationHandler.END
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logger.error(f"Error in cancel command: {e}")
+        # Ensure we still clean up even if there's an error
+        context.user_data.clear()
+        return ConversationHandler.END
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error("Exception while handling an update:", exc_info=context.error)
@@ -1279,19 +1443,21 @@ async def get_expense_category(update: Update, context: ContextTypes.DEFAULT_TYP
     return EXPENSE_REASON
 
 async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # Delete user's message first
-    if update.message:
-        try:
-            await update.message.delete()
-        except BadRequest as e:
-            logger.warning(f"Could not delete user's message: {e}")
-    
-    reason = update.message.text
-    amount = context.user_data['expense_amount']
-    currency = context.user_data['expense_currency']
-    category = context.user_data.get('expense_category', 'other')
-    
+    """Save the expense to database"""
     try:
+        # Get the reason BEFORE deleting the message
+        reason = update.message.text
+        amount = context.user_data['expense_amount']
+        currency = context.user_data['expense_currency']
+        category = context.user_data.get('expense_category', 'other')
+        
+        # Delete user's message after getting the text
+        if update.message:
+            try:
+                await update.message.delete()
+            except BadRequest as e:
+                logger.warning(f"Could not delete user's message: {e}")
+        
         conn = db_connect()
         cursor = conn.cursor()
         cursor.execute(
@@ -1314,7 +1480,11 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         response += f"<code>{formatted_amount}</code> - {reason}\n"
         response += f"Category: {category_name}"
         
-        await send_and_delete(update, context, response, parse_mode='HTML')
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=response,
+            parse_mode='HTML'
+        )
         
         # Send budget alert if needed
         if budget_alert:
@@ -1326,9 +1496,13 @@ async def save_expense(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         
         context.user_data.clear()
         return ConversationHandler.END
+        
     except Exception as e:
         logger.error(f"Error saving expense: {e}")
-        await send_and_delete(update, context, "❌ Error saving expense. Try again.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ Error saving expense. Try again."
+        )
         context.user_data.clear()
         return ConversationHandler.END
 
@@ -2412,6 +2586,21 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    
+    # Erase All Conversation Handler
+    conv_handler_erase_all = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^erase all$', re.IGNORECASE)), erase_all_start)],
+        states={
+            ERASE_CAPTCHA: [
+                MessageHandler(filters.Regex(re.compile(r'^cancel$', re.IGNORECASE)), cancel),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, verify_captcha)
+            ],
+            ERASE_FINAL_CONFIRM: [
+                CallbackQueryHandler(handle_final_erase_confirmation, pattern="^confirm_erase_"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
     application.add_handler(conv_handler_new_goal)
     application.add_handler(conv_handler_new_debt)
@@ -2428,6 +2617,7 @@ def main() -> None:
     application.add_handler(conv_handler_add_payment)
     application.add_handler(conv_handler_payment_progress)
     application.add_handler(conv_handler_delete_payment)
+    application.add_handler(conv_handler_erase_all)
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", start))
@@ -2441,7 +2631,6 @@ def main() -> None:
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^budget status$', re.IGNORECASE)), budget_status))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^financial dashboard$', re.IGNORECASE)), financial_dashboard))
     application.add_handler(MessageHandler(filters.Regex(re.compile(r'^view payments$', re.IGNORECASE)), view_payments))
-    application.add_handler(MessageHandler(filters.Regex(re.compile(r'^erase all$', re.IGNORECASE)), erase_all))
     application.add_handler(CommandHandler("cancel", cancel))
     
     # Move unknown_command to the very end and make it more specific

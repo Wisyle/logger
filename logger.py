@@ -66,6 +66,7 @@ MANUAL_TEXT = (f"<b>🤖 {random.choice(STARTUP_MESSAGES)}</b>\n\n"
                f"<code>add expense</code> - Record spending\n"
                f"<code>expense report</code> - View spending analysis\n"
                f"<code>expense compare</code> - Compare periods\n"
+               f"<code>delete expense</code> - Remove expenses\n"
                f"<code>set budget</code> - Create spending limits\n"
                f"<code>budget status</code> - Check budget health\n\n"
                
@@ -103,7 +104,7 @@ MANUAL_TEXT = (f"<b>🤖 {random.choice(STARTUP_MESSAGES)}</b>\n\n"
  REMINDER_TITLE, REMINDER_MESSAGE, REMINDER_FREQUENCY,
  PAYMENT_NAME, PAYMENT_RECIPIENT, PAYMENT_TARGET, PAYMENT_CURRENCY, PAYMENT_AMOUNT, PAYMENT_FREQUENCY,
  ADD_PAYMENT_SELECT, ADD_PAYMENT_AMOUNT, DELETE_PAYMENT_SELECT, PAYMENT_PROGRESS_SELECT,
- ERASE_CAPTCHA, ERASE_FINAL_CONFIRM) = range(47)
+ ERASE_CAPTCHA, ERASE_FINAL_CONFIRM, DELETE_EXPENSE_SELECT) = range(48)
 
 # --- Logging ---
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
@@ -319,6 +320,35 @@ def generate_asset_keyboard(assets: List[Tuple], prefix: str, page: int = 0) -> 
 
     return InlineKeyboardMarkup(keyboard)
 
+def generate_expense_keyboard(expenses: List[Tuple], prefix: str, page: int = 0) -> InlineKeyboardMarkup:
+    """Creates a paginated inline keyboard for expenses."""
+    keyboard = []
+    start_index = page * ITEMS_PER_PAGE
+    end_index = start_index + ITEMS_PER_PAGE
+
+    for expense in expenses[start_index:end_index]:
+        expense_id, amount, currency, reason, category, created_at = expense
+        category_emoji = EXPENSE_CATEGORIES.get(category, '📦 Other').split(' ')[0]
+        formatted_amount = fmt_currency_amount(amount, currency)
+        
+        # Create a short description for the button
+        short_reason = reason[:20] + "..." if len(reason) > 20 else reason
+        button_text = f"{category_emoji} {formatted_amount} - {short_reason}"
+        
+        button = InlineKeyboardButton(button_text, callback_data=f"{prefix}_{expense_id}")
+        keyboard.append([button])
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"nav_{prefix}_{page - 1}"))
+    if end_index < len(expenses):
+        nav_row.append(InlineKeyboardButton("Next ➡️", callback_data=f"nav_{prefix}_{page + 1}"))
+
+    if nav_row:
+        keyboard.append(nav_row)
+
+    return InlineKeyboardMarkup(keyboard)
+
 # --- Database Access Functions (No changes from original) ---
 def get_user_goals_and_debts(user_id: int) -> List[Tuple]:
     conn = db_connect()
@@ -481,6 +511,48 @@ def get_expense_totals_by_currency(user_id: int, period: str) -> Dict[str, float
     for amount, currency, _, _, _ in expenses:  # Added category field
         totals[currency] = totals.get(currency, 0) + amount
     return totals
+
+def get_user_expenses(user_id: int, limit: int = 50) -> List[Tuple]:
+    """Get recent expenses for a user with ID"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, amount, currency, reason, category, created_at 
+        FROM expenses 
+        WHERE user_id = ?
+        ORDER BY created_at DESC
+        LIMIT ?
+    """, (user_id, limit))
+    expenses = cursor.fetchall()
+    conn.close()
+    return expenses
+
+def get_expense_by_id(expense_id: int) -> Optional[Tuple]:
+    """Get a specific expense by ID"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT id, user_id, amount, currency, reason, category, created_at
+        FROM expenses 
+        WHERE id = ?
+    """, (expense_id,))
+    expense = cursor.fetchone()
+    conn.close()
+    return expense
+
+def delete_expense_from_db(expense_id: int) -> bool:
+    """Delete an expense by ID"""
+    conn = db_connect()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM expenses WHERE id = ?", (expense_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    except Exception as e:
+        logger.error(f"Error deleting expense: {e}")
+        return False
+    finally:
+        conn.close()
 
 # --- Budget Management Functions ---
 def get_user_budgets(user_id: int) -> List[Tuple]:
@@ -1568,6 +1640,163 @@ async def expense_compare(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     comparison = fmt_expense_comparison(current_week, previous_week, 'week')
     await send_and_delete(update, context, comparison, parse_mode='HTML')
 
+@restricted
+async def delete_expense_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Start the delete expense process"""
+    try:
+        # Delete user's message first
+        if update.message:
+            try:
+                await update.message.delete()
+            except BadRequest as e:
+                logger.warning(f"Could not delete user's message: {e}")
+        
+        user_id = update.effective_user.id
+        expenses = get_user_expenses(user_id, limit=20)  # Get recent 20 expenses
+        
+        if not expenses:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="<b>💸 No Expenses Found</b>\n\nYou haven't recorded any expenses yet. Use <code>add expense</code> to start tracking your spending.",
+                parse_mode='HTML'
+            )
+            return ConversationHandler.END
+        
+        reply_markup = generate_expense_keyboard(expenses, prefix="delete_expense", page=0)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="<b>🗑️ Delete Expense</b>\n\nSelect an expense to delete:",
+            reply_markup=reply_markup,
+            parse_mode='HTML'
+        )
+        
+        return DELETE_EXPENSE_SELECT
+        
+    except Exception as e:
+        logger.error(f"Error in delete_expense_start: {e}")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="❌ Error loading expenses. Please try again."
+        )
+        return ConversationHandler.END
+
+async def confirm_expense_delete(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle expense selection for deletion"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        expense_id = int(query.data.split("_")[-1])
+        expense = get_expense_by_id(expense_id)
+        
+        if not expense:
+            await query.edit_message_text(
+                text="❌ Expense not found. It may have already been deleted."
+            )
+            return ConversationHandler.END
+        
+        # Check if expense belongs to the user
+        if expense[1] != update.effective_user.id:
+            await query.edit_message_text(
+                text="❌ You can only delete your own expenses."
+            )
+            return ConversationHandler.END
+        
+        expense_id, user_id, amount, currency, reason, category, created_at = expense
+        
+        # Show confirmation with expense details
+        formatted_amount = fmt_currency_amount(amount, currency)
+        category_name = EXPENSE_CATEGORIES.get(category, f'📦 {category.title()}')
+        
+        date_obj = datetime.strptime(created_at, '%Y-%m-%d %H:%M:%S')
+        formatted_date = date_obj.strftime('%b %d, %Y at %H:%M')
+        
+        confirmation_text = (
+            f"<b>🗑️ Confirm Deletion</b>\n\n"
+            f"<b>Amount:</b> <code>{formatted_amount}</code>\n"
+            f"<b>Category:</b> {category_name}\n"
+            f"<b>Description:</b> {reason}\n"
+            f"<b>Date:</b> {formatted_date}\n\n"
+            f"⚠️ <b>This action cannot be undone!</b>\n\n"
+            f"Are you sure you want to delete this expense?"
+        )
+        
+        keyboard = [
+            [
+                InlineKeyboardButton("🗑️ Yes, Delete", callback_data=f"confirm_delete_expense_{expense_id}"),
+                InlineKeyboardButton("❌ Cancel", callback_data="cancel_delete_expense")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.edit_message_text(
+            text=confirmation_text,
+            parse_mode='HTML',
+            reply_markup=reply_markup
+        )
+        
+        return DELETE_EXPENSE_SELECT
+        
+    except Exception as e:
+        logger.error(f"Error in confirm_expense_delete: {e}")
+        await query.edit_message_text(
+            text="❌ Error processing expense deletion. Please try again."
+        )
+        return ConversationHandler.END
+
+async def handle_expense_delete_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle final confirmation for expense deletion"""
+    query = update.callback_query
+    await query.answer()
+    
+    try:
+        if query.data == "cancel_delete_expense":
+            await query.edit_message_text(
+                text="✅ Deletion cancelled. Your expense is safe."
+            )
+            return ConversationHandler.END
+        
+        # Extract expense ID from callback data
+        expense_id = int(query.data.split("_")[-1])
+        
+        # Get expense details before deletion for the success message
+        expense = get_expense_by_id(expense_id)
+        if not expense:
+            await query.edit_message_text(
+                text="❌ Expense not found. It may have already been deleted."
+            )
+            return ConversationHandler.END
+        
+        expense_id_db, user_id, amount, currency, reason, category, created_at = expense
+        
+        # Delete the expense
+        success = delete_expense_from_db(expense_id)
+        
+        if success:
+            formatted_amount = fmt_currency_amount(amount, currency)
+            category_name = EXPENSE_CATEGORIES.get(category, f'📦 {category.title()}')
+            
+            await query.edit_message_text(
+                text=f"✅ <b>Expense Deleted!</b>\n\n"
+                     f"<code>{formatted_amount}</code> - {reason}\n"
+                     f"Category: {category_name}\n\n"
+                     f"Your expense has been permanently removed.",
+                parse_mode='HTML'
+            )
+        else:
+            await query.edit_message_text(
+                text="❌ Failed to delete expense. Please try again."
+            )
+        
+        return ConversationHandler.END
+        
+    except Exception as e:
+        logger.error(f"Error in handle_expense_delete_confirmation: {e}")
+        await query.edit_message_text(
+            text="❌ Error deleting expense. Please try again."
+        )
+        return ConversationHandler.END
+
 # --- Budget Management Handlers ---
 @restricted
 async def set_budget_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -2491,6 +2720,20 @@ def main() -> None:
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
+    
+    # Delete Expense Conversation Handler
+    conv_handler_delete_expense = ConversationHandler(
+        entry_points=[MessageHandler(filters.Regex(re.compile(r'^delete expense$', re.IGNORECASE)), delete_expense_start)],
+        states={
+            DELETE_EXPENSE_SELECT: [
+                CallbackQueryHandler(confirm_expense_delete, pattern="^delete_expense_"),
+                CallbackQueryHandler(handle_expense_delete_confirmation, pattern="^confirm_delete_expense_"),
+                CallbackQueryHandler(handle_expense_delete_confirmation, pattern="^cancel_delete_expense$"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    
     conv_handler_set_budget = ConversationHandler(
         entry_points=[MessageHandler(filters.Regex(re.compile(r'^set budget$', re.IGNORECASE)), set_budget_start)],
         states={
@@ -2628,6 +2871,7 @@ def main() -> None:
     application.add_handler(conv_handler_progress)
     application.add_handler(conv_handler_reminder)
     application.add_handler(conv_handler_add_expense)
+    application.add_handler(conv_handler_delete_expense)
     application.add_handler(conv_handler_set_budget)
     application.add_handler(conv_handler_add_asset)
     application.add_handler(conv_handler_update_asset)
@@ -2656,7 +2900,7 @@ def main() -> None:
     # Only catch messages that don't match any of our known patterns
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & 
-        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary|set budget|budget status|financial dashboard|new payment|add payment|view payments|payment progress|delete payment|erase all)\s*$', re.IGNORECASE)), 
+        ~filters.Regex(re.compile(r'^\s*(add|new goal|new debt|view all|delete|progress|export|set reminder|add expense|delete expense|expense report|expense compare|add asset|update asset|delete asset|view assets|view all assets|asset summary|set budget|budget status|financial dashboard|new payment|add payment|view payments|payment progress|delete payment|erase all)\s*$', re.IGNORECASE)), 
         unknown_command
     ))
 

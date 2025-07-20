@@ -199,9 +199,28 @@ def init_db():
             FOREIGN KEY (payment_id) REFERENCES payments (id) ON DELETE CASCADE
         )
     """)
+    
+    # Run database migrations
+    migrate_database(cursor)
+    
     conn.commit()
     conn.close()
     logger.info(f"Database initialized at {DB_PATH}")
+
+def migrate_database(cursor):
+    """Apply database migrations for existing databases"""
+    try:
+        # Check if category column exists in expenses table
+        cursor.execute("PRAGMA table_info(expenses)")
+        columns = [column[1] for column in cursor.fetchall()]
+        
+        if 'category' not in columns:
+            logger.info("Adding category column to expenses table")
+            cursor.execute("ALTER TABLE expenses ADD COLUMN category TEXT DEFAULT 'other'")
+            
+    except Exception as e:
+        logger.warning(f"Migration warning: {e}")
+        # Continue anyway, as some migrations might fail if already applied
 
 # --- UI Formatting & Pagination (No changes from original) ---
 def fmt_progress_bar(percentage: float, length: int = 10) -> str:
